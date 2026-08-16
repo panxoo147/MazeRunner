@@ -25,6 +25,13 @@ const COUNTDOWN_MS = 5000;
 const RACE_TIMEOUT_MS = 10 * 60 * 1000; // auto-end race after 10 minutes (mazes got bigger/harder)
 const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
+// Power-up "game-changer" items — how long each effect lasts once used.
+// Effect semantics live client-side (movement is client-authoritative); the
+// server's job is just deciding pickup validity, holding at most 1 item per
+// player, and — for 'confuse' — picking who gets hit.
+const ITEM_EFFECT_MS = { turbo: 4000, reveal: 5000, confuse: 3000 };
+const ITEM_PICKUP_TOLERANCE = 20; // extra px slack on top of the pickup radius, for latency
+
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -156,6 +163,7 @@ function startRace(lobby) {
   lobby.maze = generateMaze({ seed, playerCount });
   lobby.state = 'countdown';
   lobby.raceStartAt = Date.now() + COUNTDOWN_MS;
+  lobby.itemsById = new Map(lobby.maze.items.map((it) => [it.id, { ...it, collected: false }]));
 
   for (const p of lobby.players.values()) {
     p.finished = false;
@@ -163,6 +171,7 @@ function startRace(lobby) {
     p.finishTime = null;
     p.x = lobby.maze.spawn.x;
     p.y = lobby.maze.spawn.y;
+    p.heldItem = null;
   }
   lobby.finishCount = 0;
 
@@ -198,6 +207,7 @@ io.on('connection', (socket) => {
       finishTime: null,
       x: null,
       y: null,
+      heldItem: null,
     };
     const lobby = {
       code,
@@ -238,6 +248,7 @@ io.on('connection', (socket) => {
       finishTime: null,
       x: null,
       y: null,
+      heldItem: null,
     };
     lobby.players.set(socket.id, player);
     socket.join(lobby.code);
@@ -268,12 +279,14 @@ io.on('connection', (socket) => {
     lobby.maze = null;
     lobby.raceStartAt = null;
     lobby.finishCount = 0;
+    lobby.itemsById = null;
     for (const p of lobby.players.values()) {
       p.finished = false;
       p.place = null;
       p.finishTime = null;
       p.x = null;
       p.y = null;
+      p.heldItem = null;
     }
     io.to(lobby.code).emit('returnedToLobby', lobbySnapshot(lobby));
   });
@@ -330,6 +343,61 @@ io.on('connection', (socket) => {
     // slightly ahead of its last throttled 'move' packet
     if (distanceToExit(m, player.x, player.y) > m.exitZone.radius + 30) return;
     markPlayerFinished(lobby, player);
+  });
+
+  // Pick up a power-up: only if the player isn't already holding one, the
+  // pickup hasn't been grabbed yet, and they're actually near it (server
+  // re-checks distance rather than trusting the client's "I'm close" claim).
+  socket.on('collectItem', ({ itemId } = {}) => {
+    const lobby = getLobbyOfSocket(socket);
+    if (!lobby || lobby.state !== 'racing' || !lobby.itemsById) return;
+    const player = lobby.players.get(socket.id);
+    if (!player || player.finished || player.heldItem) return;
+    const item = lobby.itemsById.get(itemId);
+    if (!item || item.collected) return;
+    if (player.x == null) return;
+    const dx = player.x - item.x, dy = player.y - item.y;
+    if (Math.sqrt(dx * dx + dy * dy) > lobby.maze.itemPickupRadius + ITEM_PICKUP_TOLERANCE) return;
+
+    item.collected = true;
+    player.heldItem = item.type;
+    io.to(lobby.code).emit('itemCollected', { itemId, type: item.type, byId: player.id, byName: player.name });
+  });
+
+  // Use whatever power-up is currently held. 'turbo' and 'reveal' only
+  // affect the user themselves; 'confuse' is the comeback/attack item — it
+  // targets whichever *other* unfinished player is currently closest
+  // (straight-line) to the exit, i.e. a rough stand-in for "the leader".
+  socket.on('useItem', () => {
+    const lobby = getLobbyOfSocket(socket);
+    if (!lobby || lobby.state !== 'racing') return;
+    const player = lobby.players.get(socket.id);
+    if (!player || player.finished || !player.heldItem) return;
+    const type = player.heldItem;
+    player.heldItem = null;
+
+    if (type === 'turbo' || type === 'reveal') {
+      io.to(player.id).emit('itemEffect', { type, duration: ITEM_EFFECT_MS[type] });
+      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type });
+      return;
+    }
+
+    // confuse
+    const m = lobby.maze;
+    let target = null;
+    let bestDist = Infinity;
+    for (const p of lobby.players.values()) {
+      if (p.id === player.id || p.finished || !p.connected || p.x == null) continue;
+      const dx = p.x - m.exitZone.x, dy = p.y - m.exitZone.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < bestDist) { bestDist = d; target = p; }
+    }
+    if (target) {
+      io.to(target.id).emit('itemEffect', { type: 'confuse', duration: ITEM_EFFECT_MS.confuse, byName: player.name });
+      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: target.name });
+    } else {
+      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: null });
+    }
   });
 
   socket.on('leaveLobby', () => handleLeave(socket));

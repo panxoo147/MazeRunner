@@ -37,6 +37,19 @@
   let miniScale = 1;
   let liveLeaderboard = [];
 
+  // ---------- power-up items ("พลิกเกม" game-changer mechanic) ----------
+  const ITEM_INFO = {
+    turbo: { icon: '⚡', label: 'เร่งความเร็ว', fx: 'fx-turbo' },
+    confuse: { icon: '🌀', label: 'กวนใจคู่แข่ง', fx: 'fx-confuse' },
+    reveal: { icon: '🧭', label: 'เข็มทิศ', fx: 'fx-reveal' },
+  };
+  const itemsById = new Map(); // itemId -> {id,x,y,type,collected}
+  const pendingCollect = new Set(); // itemIds we've asked the server about but haven't heard back on yet
+  let heldItem = null; // type string or null
+  const activeEffects = { turbo: 0, reveal: 0, confuse: 0 }; // type -> timestamp (ms) the effect ends
+  let revealPath = null; // array of {x,y} pixel points from the moment 'reveal' activated
+  let effectFxTimer = null;
+
   const PLAYER_RADIUS = 11;
 
   function idJitter(id, radius) {
@@ -184,6 +197,86 @@
   const hudTimer = document.getElementById('hud-timer');
   const hudStatus = document.getElementById('hud-status');
   const hudLeaderboard = document.getElementById('hud-leaderboard');
+  const itemToast = document.getElementById('item-toast');
+  const hudItemPanel = document.getElementById('hud-item-panel');
+  const hudItemIcon = document.getElementById('hud-item-icon');
+  const hudItemName = document.getElementById('hud-item-name');
+  const btnUseItem = document.getElementById('btn-use-item');
+
+  let toastTimer = null;
+  function showToast(text) {
+    itemToast.textContent = text;
+    itemToast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => itemToast.classList.remove('show'), 2600);
+  }
+
+  function setHeldItem(type) {
+    heldItem = type;
+    if (type) {
+      const info = ITEM_INFO[type];
+      hudItemIcon.textContent = info.icon;
+      hudItemName.textContent = info.label;
+      hudItemPanel.classList.remove('hidden');
+    } else {
+      hudItemPanel.classList.add('hidden');
+    }
+  }
+
+  function useHeldItem() {
+    if (!heldItem || !raceActive || selfFinished) return;
+    socket.emit('useItem');
+    setHeldItem(null); // optimistic — server already validated we held one
+  }
+  btnUseItem.addEventListener('click', useHeldItem);
+
+  function applyEffectVisual(fxClass, duration) {
+    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse');
+    // reflow so re-adding the same class restarts its CSS animation
+    void screens.game.offsetWidth;
+    screens.game.classList.add(fxClass);
+    clearTimeout(effectFxTimer);
+    effectFxTimer = setTimeout(() => screens.game.classList.remove(fxClass), duration);
+  }
+
+  function computeShortestPathToExit(startX, startY) {
+    const cs = maze.cellSize;
+    const sx = Math.max(0, Math.min(maze.cols - 1, Math.floor(startX / cs)));
+    const sy = Math.max(0, Math.min(maze.rows - 1, Math.floor(startY / cs)));
+    const ex = Math.max(0, Math.min(maze.cols - 1, Math.floor(maze.exitZone.x / cs)));
+    const ey = Math.max(0, Math.min(maze.rows - 1, Math.floor(maze.exitZone.y / cs)));
+    const visited = Array.from({ length: maze.rows }, () => new Array(maze.cols).fill(false));
+    const prevX = Array.from({ length: maze.rows }, () => new Array(maze.cols).fill(-1));
+    const prevY = Array.from({ length: maze.rows }, () => new Array(maze.cols).fill(-1));
+    visited[sy][sx] = true;
+    const queue = [[sx, sy]];
+    while (queue.length) {
+      const [x, y] = queue.shift();
+      if (x === ex && y === ey) break;
+      const nbrs = [];
+      if (!maze.hWalls[y][x]) nbrs.push([x, y - 1]);
+      if (!maze.hWalls[y + 1][x]) nbrs.push([x, y + 1]);
+      if (!maze.vWalls[y][x]) nbrs.push([x - 1, y]);
+      if (!maze.vWalls[y][x + 1]) nbrs.push([x + 1, y]);
+      for (const [nx, ny] of nbrs) {
+        if (nx < 0 || ny < 0 || nx >= maze.cols || ny >= maze.rows || visited[ny][nx]) continue;
+        visited[ny][nx] = true;
+        prevX[ny][nx] = x; prevY[ny][nx] = y;
+        queue.push([nx, ny]);
+      }
+    }
+    if (!visited[ey][ex]) return [];
+    const path = [];
+    let cx = ex, cy = ey;
+    while (!(cx === sx && cy === sy) && cx !== -1) {
+      path.push({ x: (cx + 0.5) * cs, y: (cy + 0.5) * cs });
+      const px = prevX[cy][cx], py = prevY[cy][cx];
+      cx = px; cy = py;
+    }
+    path.push({ x: (sx + 0.5) * cs, y: (sy + 0.5) * cs });
+    path.reverse();
+    return path;
+  }
 
   let dpr = Math.max(1, window.devicePixelRatio || 1);
   let cssW = window.innerWidth, cssH = window.innerHeight;
@@ -225,9 +318,14 @@
       }
       return;
     }
-    // only capture WASD/arrows while actually on the game screen, so typing
-    // "w"/"a"/"s"/"d" into the name or lobby-code fields is unaffected
+    // only capture WASD/arrows/space while actually on the game screen, so
+    // typing "w"/"a"/"s"/"d" or hitting space in the name/code fields is unaffected
     if (!screens.game.classList.contains('active')) return;
+    if (e.key === ' ' || e.code === 'Space') {
+      useHeldItem();
+      e.preventDefault();
+      return;
+    }
     const mapped = KEY_MAP[e.key];
     if (!mapped) return;
     keys[mapped] = true;
@@ -320,6 +418,14 @@
     liveLeaderboard = [];
     hudLeaderboard.innerHTML = '';
 
+    itemsById.clear();
+    for (const it of maze.items) itemsById.set(it.id, { ...it, collected: false });
+    pendingCollect.clear();
+    setHeldItem(null);
+    activeEffects.turbo = activeEffects.reveal = activeEffects.confuse = 0;
+    revealPath = null;
+    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse');
+
     for (const p of players) {
       const jitter = idJitter(p.id, maze.spawn.radius);
       const x = maze.spawn.x + jitter.dx;
@@ -347,6 +453,39 @@
       if (p.id === selfId) continue;
       const o = otherPlayers.get(p.id);
       if (o) { o.targetX = p.x; o.targetY = p.y; }
+    }
+  });
+
+  socket.on('itemCollected', ({ itemId, type, byId }) => {
+    const item = itemsById.get(itemId);
+    if (item) item.collected = true;
+    pendingCollect.delete(itemId);
+    if (byId === selfId) setHeldItem(type);
+  });
+
+  socket.on('itemEffect', ({ type, duration, byName }) => {
+    activeEffects[type] = Date.now() + duration;
+    applyEffectVisual(ITEM_INFO[type].fx, duration);
+    if (type === 'reveal') {
+      revealPath = computeShortestPathToExit(local.x, local.y);
+      showToast(`🧭 เข็มทิศ! ทางไปทางออกปรากฏขึ้น`);
+    } else if (type === 'turbo') {
+      showToast(`⚡ เร่งความเร็ว!`);
+    } else if (type === 'confuse') {
+      showToast(`🌀 ${byName || 'ใครบางคน'} ทำให้คุณสับสน! ควบคุมกลับด้าน`);
+    }
+  });
+
+  socket.on('itemUsed', ({ byId, byName, type, targetName }) => {
+    const info = ITEM_INFO[type];
+    if (type === 'confuse') {
+      // shown to everyone, including the attacker — the target gets their
+      // own more specific toast from the 'itemEffect' handler above
+      showToast(targetName ? `${info.icon} ${byName} ทำให้ ${targetName} สับสน!` : `${info.icon} ${byName} ใช้ ${info.label} แต่ไม่มีเป้าหมาย`);
+    } else if (byId !== selfId) {
+      // self already saw their own toast via 'itemEffect' — this is just
+      // ambient flavor for everyone else watching
+      showToast(`${info.icon} ${byName} ใช้ ${info.label}`);
     }
   });
 
@@ -537,20 +676,23 @@
 
     // movement
     if (raceActive && !selfFinished && maze) {
+      const nowMs = Date.now();
+      const confused = activeEffects.confuse > nowMs;
+      const turbo = activeEffects.turbo > nowMs;
+      let dirX = 0, dirY = 0, speedFactor = 0;
+
       if (controlMode === 'wasd') {
-        let ix = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
-        let iy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+        const ix = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+        const iy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
         if (ix !== 0 || iy !== 0) {
           const len = Math.sqrt(ix * ix + iy * iy);
-          local.x += (ix / len) * MAX_SPEED * dt;
-          local.y += (iy / len) * MAX_SPEED * dt;
+          dirX = ix / len; dirY = iy / len; speedFactor = 1;
         }
       } else if (controlMode === 'touch') {
         const dist = Math.sqrt(joystick.dx * joystick.dx + joystick.dy * joystick.dy);
         if (joystick.active && dist > 4) {
-          const speedFactor = Math.min(1, dist / JOY_MAX);
-          local.x += (joystick.dx / dist) * MAX_SPEED * speedFactor * dt;
-          local.y += (joystick.dy / dist) * MAX_SPEED * speedFactor * dt;
+          dirX = joystick.dx / dist; dirY = joystick.dy / dist;
+          speedFactor = Math.min(1, dist / JOY_MAX);
         }
       } else {
         const playerScreenX = local.x - camX;
@@ -558,13 +700,37 @@
         const dx = mouse.x - playerScreenX, dy = mouse.y - playerScreenY;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist > DEADZONE) {
-          const speedFactor = Math.min(1, (dist - DEADZONE) / (MAX_REACH - DEADZONE));
-          const nx = dx / dist, ny = dy / dist;
-          local.x += nx * MAX_SPEED * speedFactor * dt;
-          local.y += ny * MAX_SPEED * speedFactor * dt;
+          dirX = dx / dist; dirY = dy / dist;
+          speedFactor = Math.min(1, (dist - DEADZONE) / (MAX_REACH - DEADZONE));
         }
       }
+
+      if (confused) { dirX = -dirX; dirY = -dirY; }
+      const speed = MAX_SPEED * (turbo ? 1.6 : 1);
+      local.x += dirX * speed * speedFactor * dt;
+      local.y += dirY * speed * speedFactor * dt;
+
       resolveCollisions(local, PLAYER_RADIUS);
+
+      // item pickups — same client-detects-then-server-confirms pattern as
+      // the finish line, so 40-50 players don't need server-side physics
+      if (!heldItem) {
+        for (const item of itemsById.values()) {
+          if (item.collected || pendingCollect.has(item.id)) continue;
+          const idx = local.x - item.x, idy = local.y - item.y;
+          if (Math.sqrt(idx * idx + idy * idy) <= maze.itemPickupRadius) {
+            pendingCollect.add(item.id);
+            // The server validates pickup proximity against the player's
+            // last-known position from a throttled 'move' event. Force a
+            // fresh sync BEFORE requesting the pickup so a fast-moving (or
+            // just-teleported) player doesn't get rejected due to a stale
+            // server-side position — order matters, socket.io preserves it.
+            socket.emit('move', { x: local.x, y: local.y });
+            lastSendTime = now;
+            socket.emit('collectItem', { itemId: item.id });
+          }
+        }
+      }
 
       // finish check
       if (!finishSent) {
@@ -633,6 +799,38 @@
     ctx.lineJoin = 'round';
     ctx.stroke(wallPath);
 
+    // reveal-path overlay (while the 'reveal' item effect is active)
+    if (revealPath && activeEffects.reveal > Date.now() && revealPath.length > 1) {
+      ctx.save();
+      ctx.setLineDash([10, 8]);
+      ctx.strokeStyle = 'rgba(255, 209, 102, 0.85)';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(revealPath[0].x, revealPath[0].y);
+      for (let i = 1; i < revealPath.length; i++) ctx.lineTo(revealPath[i].x, revealPath[i].y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // item pickups
+    for (const item of itemsById.values()) {
+      if (item.collected) continue;
+      const info = ITEM_INFO[item.type];
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, 15, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.font = '18px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(info.icon, item.x, item.y + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
     // other players
     for (const o of otherPlayers.values()) {
       if (o.finished) continue;
@@ -677,6 +875,10 @@
       local, mouse,
       getMaze: () => maze,
       getRaceStartAt: () => raceStartAt,
+      getHeldItem: () => heldItem,
+      getActiveEffects: () => ({ ...activeEffects }),
+      getItems: () => [...itemsById.values()],
+      useHeldItem,
     };
   }
 })();

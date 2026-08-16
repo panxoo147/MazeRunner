@@ -9,6 +9,12 @@
 const CELL_SIZE = 46; // px per maze cell
 const WALL_THICKNESS = 6;
 
+// Power-up item types scattered through the maze — see server.js for how
+// each one is actually applied (server decides effects/targets; this file
+// only decides where items spawn).
+const ITEM_TYPES = ['turbo', 'confuse', 'reveal'];
+const ITEM_PICKUP_RADIUS = 20;
+
 /**
  * Pick a maze size that scales gently with the number of players so a
  * 40-50 player lobby has enough room to spread out and doesn't turn into a
@@ -105,6 +111,8 @@ function generateMaze({ cols, rows, seed, playerCount }) {
   openRoom(0, 0);
   openRoom(cols - roomSize, rows - roomSize);
 
+  const items = generateItems({ cols, rows, roomSize, rng });
+
   const wallSegments = [];
   for (let y = 0; y <= rows; y++) {
     for (let x = 0; x < cols; x++) {
@@ -144,7 +152,46 @@ function generateMaze({ cols, rows, seed, playerCount }) {
     height: rows * CELL_SIZE,
     spawn,
     exitZone,
+    items,
+    itemPickupRadius: ITEM_PICKUP_RADIUS,
   };
 }
 
-module.exports = { generateMaze, sizeForPlayers, CELL_SIZE, WALL_THICKNESS };
+/**
+ * Scatter power-up pickups across the maze (skipping the open spawn/exit
+ * rooms so nobody grabs one before the race even starts). Count scales with
+ * maze size so bigger races feel just as "eventful" as small ones.
+ */
+function generateItems({ cols, rows, roomSize, rng }) {
+  const inRoom = (x, y) =>
+    (x < roomSize && y < roomSize) ||
+    (x >= cols - roomSize && y >= rows - roomSize);
+
+  const candidates = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (!inRoom(x, y)) candidates.push([x, y]);
+    }
+  }
+  // Fisher-Yates shuffle (seeded) so item placement is reproducible per seed
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+
+  const count = Math.max(10, Math.min(45, Math.floor(candidates.length / 18)));
+  const items = [];
+  for (let i = 0; i < count && i < candidates.length; i++) {
+    const [cx, cy] = candidates[i];
+    const type = ITEM_TYPES[Math.floor(rng() * ITEM_TYPES.length)];
+    items.push({
+      id: `item_${i}`,
+      x: (cx + 0.5) * CELL_SIZE,
+      y: (cy + 0.5) * CELL_SIZE,
+      type,
+    });
+  }
+  return items;
+}
+
+module.exports = { generateMaze, sizeForPlayers, CELL_SIZE, WALL_THICKNESS, ITEM_TYPES, ITEM_PICKUP_RADIUS };
