@@ -11,25 +11,34 @@
   font-family: 'Segoe UI', 'Noto Sans Thai', system-ui, sans-serif;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html, body {
   margin: 0;
   padding: 0;
   width: 100%;
   height: 100%;
+  height: 100dvh;
   background: radial-gradient(circle at 50% 0%, #1b2140 0%, var(--bg) 60%);
   color: var(--text);
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  user-select: none;
+  -webkit-user-select: none;
 }
+input, textarea { user-select: text; -webkit-user-select: text; }
 
 .screen {
   display: none;
   width: 100%;
   height: 100%;
+  height: 100dvh;
   align-items: center;
   justify-content: center;
   position: relative;
+  overflow-y: auto;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 .screen.active { display: flex; }
 
@@ -39,6 +48,9 @@ html, body {
   padding: 32px;
   box-shadow: 0 20px 60px rgba(0,0,0,0.45);
   border: 1px solid rgba(255,255,255,0.06);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  margin: 16px;
 }
 
 /* HOME */
@@ -71,6 +83,7 @@ html, body {
 
 .control-toggle {
   display: flex;
+  flex-wrap: wrap;
   background: var(--bg-alt);
   border: 1px solid rgba(255,255,255,0.1);
   border-radius: 10px;
@@ -79,14 +92,16 @@ html, body {
 }
 .control-opt {
   flex: 1;
+  min-width: 88px;
   border: none;
   background: transparent;
   color: var(--text-dim);
-  padding: 9px 10px;
+  padding: 10px 8px;
   border-radius: 7px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.12s ease, color 0.12s ease;
 }
 .control-opt.active { background: var(--accent); color: white; }
@@ -104,10 +119,12 @@ html, body {
 .btn {
   border: none;
   border-radius: 10px;
-  padding: 13px 18px;
+  padding: 14px 18px;
+  min-height: 48px;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
+  touch-action: manipulation;
   transition: transform 0.08s ease, opacity 0.15s ease;
 }
 .btn:active { transform: scale(0.97); }
@@ -169,35 +186,98 @@ html, body {
 .wait-msg { text-align: center; color: var(--text-dim); font-size: 13px; margin: 4px 0; }
 
 /* GAME */
-#game-canvas { display: block; width: 100vw; height: 100vh; background: #0a0c16; touch-action: none; cursor: crosshair; }
+#screen-game.screen { display: none; padding: 0; overflow: hidden; } /* game screen has its own HUD layout, not the centered panel layout */
+#screen-game.screen.active { display: block; }
+#game-canvas { display: block; width: 100vw; height: 100dvh; background: #0a0c16; touch-action: none; cursor: crosshair; }
 
-.hud { position: absolute; padding: 10px 14px; background: rgba(15,18,32,0.75); border-radius: 12px; backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.08); }
-.hud-top-left { top: 16px; left: 16px; }
-.hud-top-right { top: 16px; right: 16px; min-width: 160px; }
-.hud-timer { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--accent-2); }
-.hud-status { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.hud {
+  position: absolute;
+  padding: 8px 12px;
+  background: rgba(15,18,32,0.75);
+  border-radius: 12px;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255,255,255,0.08);
+  max-width: 42vw;
+}
+.hud-top-left { top: calc(env(safe-area-inset-top) + 10px); left: calc(env(safe-area-inset-left) + 10px); }
+.hud-top-right { top: calc(env(safe-area-inset-top) + 10px); right: calc(env(safe-area-inset-right) + 10px); min-width: 120px; }
+.hud-timer { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--accent-2); }
+.hud-status { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .hud-control-btn {
   margin-top: 8px;
   border: 1px solid rgba(255,255,255,0.14);
   background: rgba(255,255,255,0.06);
   color: var(--text);
   font-size: 11px;
-  padding: 5px 9px;
+  padding: 7px 10px;
+  min-height: 34px;
   border-radius: 7px;
   cursor: pointer;
+  touch-action: manipulation;
 }
 .hud-control-btn:hover { background: rgba(255,255,255,0.12); }
-.hud-title { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
-.hud-leaderboard { margin: 0; padding: 0 0 0 18px; font-size: 13px; max-height: 140px; overflow-y: auto; }
+.hud-title { font-size: 10px; color: var(--text-dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px; }
+.hud-leaderboard { margin: 0; padding: 0 0 0 16px; font-size: 12px; max-height: 22vh; overflow-y: auto; }
 .hud-leaderboard li { margin-bottom: 3px; }
 
 .minimap {
   position: absolute;
-  bottom: 16px;
-  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 10px);
+  right: calc(env(safe-area-inset-right) + 10px);
   background: rgba(10,12,22,0.85);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 10px;
+  max-width: 34vw;
+  max-height: 30vh;
+}
+
+/* virtual joystick (touch control mode) */
+.joystick-base {
+  position: absolute;
+  width: 116px;
+  height: 116px;
+  margin-left: -58px;
+  margin-top: -58px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.08);
+  border: 2px solid rgba(255,255,255,0.25);
+  z-index: 4;
+  pointer-events: none;
+}
+.joystick-base.hidden { display: none; }
+.joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin-left: -26px;
+  margin-top: -26px;
+  border-radius: 50%;
+  background: rgba(108,92,231,0.75);
+  border: 2px solid rgba(255,255,255,0.5);
+}
+
+.orientation-hint {
+  display: none;
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 100px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15,18,32,0.9);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-size: 11px;
+  max-width: 70vw;
+  text-align: center;
+  pointer-events: none;
+  z-index: 3;
+  animation: fadeOutHint 5s ease forwards;
+}
+@keyframes fadeOutHint { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+@media (max-width: 700px) and (orientation: portrait) {
+  .orientation-hint { display: block; }
 }
 
 .countdown-overlay {
@@ -227,7 +307,28 @@ html, body {
 .results-list .medal { margin-right: 4px; }
 .results-footer { display: flex; flex-direction: column; gap: 10px; }
 
+/* RESPONSIVE / MOBILE */
 @media (max-width: 480px) {
-  #countdown-number { font-size: 80px; }
-  .hud-top-right { min-width: 130px; }
+  #countdown-number { font-size: 72px; }
+  .hud-top-right { min-width: 110px; max-width: 46vw; }
+  .hud { padding: 7px 10px; }
+  .hud-timer { font-size: 17px; }
+  .panel { padding: 22px; margin: 10px; }
+  .home-panel h1 { font-size: 26px; }
+  .subtitle { font-size: 12.5px; margin-bottom: 18px; }
+  .lobby-code { font-size: 26px; letter-spacing: 4px; }
+  .player-list { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); max-height: 32vh; }
+  .control-opt { font-size: 12px; padding: 9px 6px; }
+}
+
+@media (max-height: 420px) {
+  /* short viewports (landscape phones) — keep the HUD out of the way */
+  .hud-leaderboard { max-height: 14vh; }
+  .minimap { max-height: 22vh; }
+  #countdown-number { font-size: 64px; }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  /* touch devices: bigger tap targets, no hover-dependent affordances */
+  .btn, .control-opt, .hud-control-btn { min-height: 46px; }
 }

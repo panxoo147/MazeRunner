@@ -61,31 +61,37 @@
     return v || 'Player';
   }
 
-  // ---------- control mode (mouse-cursor vs WASD) ----------
+  // ---------- control mode (mouse-cursor / WASD / touch joystick) ----------
   // A per-player local preference — movement is fully client-authoritative,
   // so each player can pick whichever scheme they like independently.
-  let controlMode = sessionStorage.getItem('mazerace_control') || 'mouse';
+  const isTouchDevice = window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window;
+  const CONTROL_MODES = ['mouse', 'wasd', 'touch'];
+  let controlMode = sessionStorage.getItem('mazerace_control') || (isTouchDevice ? 'touch' : 'mouse');
+  if (!CONTROL_MODES.includes(controlMode)) controlMode = 'mouse';
   const controlToggle = document.getElementById('control-toggle');
   const hudControlBtn = document.getElementById('hud-control-toggle');
-  const CONTROL_LABEL = { mouse: '🖱️ เมาส์', wasd: '⌨️ WASD' };
+  const CONTROL_LABEL = { mouse: '🖱️ เมาส์', wasd: '⌨️ WASD', touch: '📱 จอย' };
 
   function setControlMode(mode) {
-    controlMode = mode === 'wasd' ? 'wasd' : 'mouse';
+    controlMode = CONTROL_MODES.includes(mode) ? mode : 'mouse';
     sessionStorage.setItem('mazerace_control', controlMode);
     controlToggle.querySelectorAll('.control-opt').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.mode === controlMode);
     });
     hudControlBtn.textContent = CONTROL_LABEL[controlMode];
-    // reset held keys whenever we switch away from WASD mid-race so a key
-    // that was down doesn't stay "stuck" after flipping back to mouse
+    // reset held keys / joystick whenever we switch modes mid-race so an
+    // old input doesn't stay "stuck" after flipping to a different scheme
     keys.w = keys.a = keys.s = keys.d = false;
+    joystickEnd();
   }
 
   controlToggle.addEventListener('click', (e) => {
     const btn = e.target.closest('.control-opt');
     if (btn) setControlMode(btn.dataset.mode);
   });
-  hudControlBtn.addEventListener('click', () => setControlMode(controlMode === 'mouse' ? 'wasd' : 'mouse'));
+  hudControlBtn.addEventListener('click', () => {
+    setControlMode(CONTROL_MODES[(CONTROL_MODES.indexOf(controlMode) + 1) % CONTROL_MODES.length]);
+  });
 
   document.getElementById('btn-create').addEventListener('click', () => {
     homeError.textContent = '';
@@ -214,7 +220,9 @@
   };
   window.addEventListener('keydown', (e) => {
     if (e.key === 'm' || e.key === 'M') {
-      if (screens.game.classList.contains('active')) setControlMode(controlMode === 'mouse' ? 'wasd' : 'mouse');
+      if (screens.game.classList.contains('active')) {
+        setControlMode(CONTROL_MODES[(CONTROL_MODES.indexOf(controlMode) + 1) % CONTROL_MODES.length]);
+      }
       return;
     }
     // only capture WASD/arrows while actually on the game screen, so typing
@@ -234,6 +242,70 @@
   // doesn't keep "walking" forever into a wall
   window.addEventListener('blur', () => { keys.w = keys.a = keys.s = keys.d = false; });
 
+  // ---------- touch joystick input ----------
+  // A dynamic on-screen joystick: appears wherever the player first touches
+  // the canvas, drag away from that point to set direction + speed. Bound
+  // at the canvas level (not window) so a tap that starts on top of a HUD
+  // panel (leaderboard/minimap/timer) never spawns a joystick there — and
+  // because touch events stay associated with their original target for
+  // the whole gesture, dragging the finger under a HUD box afterward still
+  // keeps updating the joystick correctly (no "sticking" like mouse had).
+  const joystickBase = document.getElementById('joystick-base');
+  const joystickKnob = document.getElementById('joystick-knob');
+  const JOY_MAX = 55; // px radius the knob can travel from its base
+  const joystick = { active: false, touchId: null, baseX: 0, baseY: 0, dx: 0, dy: 0 };
+
+  function joystickStart(x, y, touchId) {
+    joystick.active = true;
+    joystick.touchId = touchId;
+    joystick.baseX = x;
+    joystick.baseY = y;
+    joystick.dx = 0;
+    joystick.dy = 0;
+    joystickBase.style.left = x + 'px';
+    joystickBase.style.top = y + 'px';
+    joystickBase.classList.remove('hidden');
+    joystickKnob.style.left = '50%';
+    joystickKnob.style.top = '50%';
+  }
+  function joystickUpdate(x, y) {
+    if (!joystick.active) return;
+    let dx = x - joystick.baseX, dy = y - joystick.baseY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > JOY_MAX) { dx = (dx / dist) * JOY_MAX; dy = (dy / dist) * JOY_MAX; }
+    joystick.dx = dx; joystick.dy = dy;
+    joystickKnob.style.left = 58 + dx + 'px';
+    joystickKnob.style.top = 58 + dy + 'px';
+  }
+  function joystickEnd() {
+    joystick.active = false;
+    joystick.touchId = null;
+    joystick.dx = 0; joystick.dy = 0;
+    joystickBase.classList.add('hidden');
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    if (controlMode !== 'touch' || !raceActive || selfFinished) return;
+    const t = e.changedTouches[0];
+    if (!t) return;
+    joystickStart(t.clientX, t.clientY, t.identifier);
+    e.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', (e) => {
+    if (!joystick.active) return;
+    for (const t of e.changedTouches) {
+      if (t.identifier === joystick.touchId) { joystickUpdate(t.clientX, t.clientY); break; }
+    }
+    e.preventDefault();
+  }, { passive: false });
+  function handleTouchEnd(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joystick.touchId) { joystickEnd(); break; }
+    }
+  }
+  canvas.addEventListener('touchend', handleTouchEnd);
+  canvas.addEventListener('touchcancel', handleTouchEnd);
+
   setControlMode(controlMode); // sync UI + hud label to the saved preference
 
   socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players }) => {
@@ -243,6 +315,7 @@
     selfFinished = false;
     finishSent = false;
     keys.w = keys.a = keys.s = keys.d = false;
+    joystickEnd();
     otherPlayers.clear();
     liveLeaderboard = [];
     hudLeaderboard.innerHTML = '';
@@ -283,6 +356,7 @@
     if (id === selfId) {
       selfFinished = true;
       hudStatus.textContent = `เข้าเส้นชัยอันดับที่ ${place}! 🎉`;
+      joystickEnd();
     }
     renderLiveLeaderboard();
   });
@@ -368,7 +442,9 @@
 
   // ---------- minimap ----------
   function buildMinimapCache() {
-    const targetW = 220;
+    // shrink the minimap on small/mobile viewports so it doesn't eat too
+    // much of the screen or crowd the joystick corner
+    const targetW = Math.max(120, Math.min(220, Math.round(cssW * 0.28)));
     miniScale = targetW / maze.width;
     const targetH = Math.round(maze.height * miniScale);
     miniCanvas.width = targetW; miniCanvas.height = targetH;
@@ -456,6 +532,13 @@
           const len = Math.sqrt(ix * ix + iy * iy);
           local.x += (ix / len) * MAX_SPEED * dt;
           local.y += (iy / len) * MAX_SPEED * dt;
+        }
+      } else if (controlMode === 'touch') {
+        const dist = Math.sqrt(joystick.dx * joystick.dx + joystick.dy * joystick.dy);
+        if (joystick.active && dist > 4) {
+          const speedFactor = Math.min(1, dist / JOY_MAX);
+          local.x += (joystick.dx / dist) * MAX_SPEED * speedFactor * dt;
+          local.y += (joystick.dy / dist) * MAX_SPEED * speedFactor * dt;
         }
       } else {
         const playerScreenX = local.x - camX;
