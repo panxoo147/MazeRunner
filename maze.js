@@ -1,0 +1,147 @@
+// maze.js — procedural maze generation (recursive backtracker) + collision data
+// The maze is generated on the server so every player in a lobby races the
+// exact same layout. Wall data is sent to clients once; clients handle their
+// own movement/collision locally (client-authoritative for smoothness) and
+// only report finish events + throttled positions back to the server.
+
+'use strict';
+
+const CELL_SIZE = 46; // px per maze cell
+const WALL_THICKNESS = 6;
+
+/**
+ * Pick a maze size that scales gently with the number of players so a
+ * 40-50 player lobby has enough room to spread out and doesn't turn into a
+ * single-file traffic jam.
+ */
+function sizeForPlayers(playerCount) {
+  const n = Math.max(1, playerCount || 1);
+  const base = 18;
+  const extra = Math.min(16, Math.floor(n / 3));
+  const cols = base + extra; // up to 34
+  const rows = Math.round((base + extra) * 0.72);
+  return { cols, rows };
+}
+
+function makeRng(seed) {
+  // simple mulberry32 PRNG so mazes are reproducible from a numeric seed
+  let a = seed >>> 0;
+  return function rng() {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function generateMaze({ cols, rows, seed, playerCount }) {
+  if (!cols || !rows) {
+    const s = sizeForPlayers(playerCount);
+    cols = s.cols;
+    rows = s.rows;
+  }
+  const rng = makeRng(seed >>> 0);
+
+  // hWalls[y][x]: horizontal wall segment on top edge of cell (x,y); y ranges 0..rows
+  // vWalls[y][x]: vertical wall segment on left edge of cell (x,y); x ranges 0..cols
+  const hWalls = Array.from({ length: rows + 1 }, () => new Array(cols).fill(true));
+  const vWalls = Array.from({ length: rows }, () => new Array(cols + 1).fill(true));
+  const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
+
+  // iterative randomized DFS (recursive backtracker)
+  const stack = [[0, 0]];
+  visited[0][0] = true;
+  while (stack.length) {
+    const [cx, cy] = stack[stack.length - 1];
+    const neighbors = [];
+    if (cy > 0 && !visited[cy - 1][cx]) neighbors.push([cx, cy - 1, 'N']);
+    if (cx < cols - 1 && !visited[cy][cx + 1]) neighbors.push([cx + 1, cy, 'E']);
+    if (cy < rows - 1 && !visited[cy + 1][cx]) neighbors.push([cx, cy + 1, 'S']);
+    if (cx > 0 && !visited[cy][cx - 1]) neighbors.push([cx - 1, cy, 'W']);
+
+    if (neighbors.length === 0) {
+      stack.pop();
+      continue;
+    }
+    const [nx, ny, dir] = neighbors[Math.floor(rng() * neighbors.length)];
+    if (dir === 'N') hWalls[cy][cx] = false;
+    else if (dir === 'S') hWalls[cy + 1][cx] = false;
+    else if (dir === 'E') vWalls[cy][cx + 1] = false;
+    else if (dir === 'W') vWalls[cy][cx] = false;
+    visited[ny][nx] = true;
+    stack.push([nx, ny]);
+  }
+
+  // Braid the maze a little: knock down ~12% of remaining interior walls so
+  // there are loops/alternate routes instead of one single strict path.
+  // This matters a lot at 40-50 players — a pure tree maze is one giant
+  // bottleneck corridor.
+  const braidChance = 0.12;
+  for (let y = 1; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (hWalls[y][x] && rng() < braidChance) hWalls[y][x] = false;
+    }
+  }
+  for (let y = 0; y < rows; y++) {
+    for (let x = 1; x < cols; x++) {
+      if (vWalls[y][x] && rng() < braidChance) vWalls[y][x] = false;
+    }
+  }
+
+  // Carve an open spawn room (top-left) and exit room (bottom-right) so
+  // dozens of players don't spawn stacked in a single 1-wide cell.
+  const roomSize = 3;
+  function openRoom(x0, y0) {
+    for (let y = y0; y < y0 + roomSize; y++) {
+      for (let x = x0; x < x0 + roomSize; x++) {
+        if (x < cols - 1 && x + 1 < x0 + roomSize) vWalls[y][x + 1] = false;
+        if (y < rows - 1 && y + 1 < y0 + roomSize) hWalls[y + 1][x] = false;
+      }
+    }
+  }
+  openRoom(0, 0);
+  openRoom(cols - roomSize, rows - roomSize);
+
+  const wallSegments = [];
+  for (let y = 0; y <= rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (hWalls[y][x]) {
+        wallSegments.push({ x1: x * CELL_SIZE, y1: y * CELL_SIZE, x2: (x + 1) * CELL_SIZE, y2: y * CELL_SIZE });
+      }
+    }
+  }
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x <= cols; x++) {
+      if (vWalls[y][x]) {
+        wallSegments.push({ x1: x * CELL_SIZE, y1: y * CELL_SIZE, x2: x * CELL_SIZE, y2: (y + 1) * CELL_SIZE });
+      }
+    }
+  }
+
+  const spawn = {
+    x: (roomSize * CELL_SIZE) / 2,
+    y: (roomSize * CELL_SIZE) / 2,
+    radius: (roomSize * CELL_SIZE) / 2 - CELL_SIZE * 0.3,
+  };
+  const exitZone = {
+    x: cols * CELL_SIZE - (roomSize * CELL_SIZE) / 2,
+    y: rows * CELL_SIZE - (roomSize * CELL_SIZE) / 2,
+    radius: (roomSize * CELL_SIZE) / 2 - CELL_SIZE * 0.3,
+  };
+
+  return {
+    cols,
+    rows,
+    cellSize: CELL_SIZE,
+    wallThickness: WALL_THICKNESS,
+    hWalls,
+    vWalls,
+    wallSegments,
+    width: cols * CELL_SIZE,
+    height: rows * CELL_SIZE,
+    spawn,
+    exitZone,
+  };
+}
+
+module.exports = { generateMaze, sizeForPlayers, CELL_SIZE, WALL_THICKNESS };
