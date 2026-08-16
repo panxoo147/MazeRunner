@@ -390,11 +390,23 @@
     });
     const isHost = currentLobby && currentLobby.hostId === selfId;
     document.getElementById('btn-play-again').style.display = isHost ? 'block' : 'none';
+    document.getElementById('btn-back-to-lobby').style.display = isHost ? 'block' : 'none';
     document.getElementById('results-wait-msg').style.display = isHost ? 'none' : 'block';
     showScreen('results');
   }
 
   document.getElementById('btn-play-again').addEventListener('click', () => socket.emit('startRace'));
+  document.getElementById('btn-back-to-lobby').addEventListener('click', () => socket.emit('backToLobby'));
+
+  // Host sent everyone back to the waiting room — applies to every client
+  // in the lobby (including the host), so screen transition happens here
+  // rather than only in response to that one player's own click.
+  socket.on('returnedToLobby', (lobby) => {
+    maze = null;
+    otherPlayers.clear();
+    applyLobby(lobby);
+    showScreen('lobby');
+  });
 
   // ---------- collision ----------
   function closestPointOnSegment(px, py, x1, y1, x2, y2) {

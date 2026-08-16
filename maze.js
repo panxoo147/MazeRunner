@@ -12,13 +12,14 @@ const WALL_THICKNESS = 6;
 /**
  * Pick a maze size that scales gently with the number of players so a
  * 40-50 player lobby has enough room to spread out and doesn't turn into a
- * single-file traffic jam.
+ * single-file traffic jam. Bumped up from the original sizing to make races
+ * noticeably bigger/longer at every player count.
  */
 function sizeForPlayers(playerCount) {
   const n = Math.max(1, playerCount || 1);
-  const base = 18;
-  const extra = Math.min(16, Math.floor(n / 3));
-  const cols = base + extra; // up to 34
+  const base = 26;
+  const extra = Math.min(24, Math.floor(n / 2));
+  const cols = base + extra; // up to 50
   const rows = Math.round((base + extra) * 0.72);
   return { cols, rows };
 }
@@ -72,11 +73,13 @@ function generateMaze({ cols, rows, seed, playerCount }) {
     stack.push([nx, ny]);
   }
 
-  // Braid the maze a little: knock down ~12% of remaining interior walls so
-  // there are loops/alternate routes instead of one single strict path.
-  // This matters a lot at 40-50 players — a pure tree maze is one giant
-  // bottleneck corridor.
-  const braidChance = 0.12;
+  // Braid the maze only lightly: knock down a small fraction of remaining
+  // interior walls so there's *some* loop/alternate-route relief for 40-50
+  // players funneling through the same corridors, without erasing what
+  // makes a maze hard. Lower braidChance = fewer shortcuts = more dead ends
+  // and longer, twistier paths to the exit (a fully unbraided/"perfect"
+  // maze has the maximum possible number of dead ends for its size).
+  const braidChance = 0.045;
   for (let y = 1; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
       if (hWalls[y][x] && rng() < braidChance) hWalls[y][x] = false;

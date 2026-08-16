@@ -22,7 +22,7 @@ const PORT = process.env.PORT || 3000;
 const MAX_PLAYERS_PER_LOBBY = 50;
 const TICK_MS = 100; // 10Hz position broadcast
 const COUNTDOWN_MS = 5000;
-const RACE_TIMEOUT_MS = 6 * 60 * 1000; // auto-end race after 6 minutes
+const RACE_TIMEOUT_MS = 10 * 60 * 1000; // auto-end race after 10 minutes (mazes got bigger/harder)
 const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
 const app = express();
@@ -253,6 +253,29 @@ io.on('connection', (socket) => {
     if (lobby.state !== 'waiting' && lobby.state !== 'results') return;
     if (lobby.players.size < 1) return;
     startRace(lobby);
+  });
+
+  // Host sends everyone from the results screen back to the waiting room
+  // instead of jumping straight into another race. This also re-opens the
+  // lobby to new joins (join is normally blocked once state !== 'waiting').
+  socket.on('backToLobby', () => {
+    const lobby = getLobbyOfSocket(socket);
+    if (!lobby) return;
+    if (lobby.hostId !== socket.id) return;
+    if (lobby.state !== 'results') return;
+
+    lobby.state = 'waiting';
+    lobby.maze = null;
+    lobby.raceStartAt = null;
+    lobby.finishCount = 0;
+    for (const p of lobby.players.values()) {
+      p.finished = false;
+      p.place = null;
+      p.finishTime = null;
+      p.x = null;
+      p.y = null;
+    }
+    io.to(lobby.code).emit('returnedToLobby', lobbySnapshot(lobby));
   });
 
   // Marks a player finished and broadcasts it. Called both when the client
