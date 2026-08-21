@@ -56,6 +56,21 @@ function colorForIndex(index) {
   return `hsl(${hue.toFixed(1)}, 72%, 58%)`;
 }
 
+// Same deterministic per-player scatter the client uses to draw each player
+// around the spawn point (public/game.js has an identical copy). The server
+// needs to match it exactly: player.x/y here is what gets broadcast in the
+// very first 'tick' after the countdown ends, before any client has sent its
+// own first 'move' — if this didn't match, every other player would visibly
+// snap to the exact spawn center for a frame before jumping back out to
+// their real (client-jittered) spot the moment real position updates arrive.
+function idJitter(id, radius) {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  const angle = (hash % 360) * (Math.PI / 180);
+  const frac = 0.25 + ((hash >> 5) % 100) / 150; // 0.25 - ~0.9 of radius
+  return { dx: Math.cos(angle) * radius * frac, dy: Math.sin(angle) * radius * frac };
+}
+
 function randomCode() {
   let code = '';
   for (let i = 0; i < 5; i++) {
@@ -182,8 +197,9 @@ function startRace(lobby) {
     p.place = null;
     p.finishTime = null;
     if (!p.isSpectator) {
-      p.x = lobby.maze.spawn.x;
-      p.y = lobby.maze.spawn.y;
+      const jitter = idJitter(p.id, lobby.maze.spawn.radius);
+      p.x = lobby.maze.spawn.x + jitter.dx;
+      p.y = lobby.maze.spawn.y + jitter.dy;
       p.heldItem = null;
     }
   }

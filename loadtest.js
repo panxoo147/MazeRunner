@@ -184,7 +184,7 @@ class Bot {
   }
 
   tryCollectNearbyItems(items) {
-    if (this.heldItem || !items) return;
+    if (this.heldItem || !items || !this.maze) return; // maze isn't set until this bot's own 'raceStarting' has fired
     for (const it of items) {
       if (it.collected) continue;
       const dx = this.x - it.x, dy = this.y - it.y;
@@ -234,8 +234,27 @@ async function main() {
       b.socket.emit('joinLobby', { code, name: b.name }, (res) => (res.ok ? resolve(res) : reject(new Error(res.error))));
     }))
   );
-  const joined = joinResults.filter((r) => r.status === 'fulfilled').length + (usingExistingLobby ? 0 : 1);
+  const joinFailures = joinResults
+    .map((r, i) => (r.status === 'rejected' ? { bot: joinTargets[i], reason: r.reason.message } : null))
+    .filter(Boolean);
+  const joined = joinTargets.length - joinFailures.length + (usingExistingLobby ? 0 : 1);
   console.log(`joined lobby ${code}: ${joined}/${liveBots.length} in ${Date.now() - joinStart}ms`);
+  if (joinFailures.length) {
+    // e.g. lobby already full, or already racing and these weren't spectators
+    // — drop them now so they don't sit around forever waiting for a
+    // 'raceStarting' that will never come for a lobby they're not in
+    const reasons = [...new Set(joinFailures.map((f) => f.reason))];
+    console.log(`  ${joinFailures.length} bot(s) couldn't join and were dropped — reason(s): ${reasons.join('; ')}`);
+    const failedBots = new Set(joinFailures.map((f) => f.bot));
+    joinFailures.forEach((f) => f.bot.close());
+    for (let i = liveBots.length - 1; i >= 0; i--) {
+      if (failedBots.has(liveBots[i])) liveBots.splice(i, 1);
+    }
+  }
+  if (liveBots.length === 0) {
+    console.error('No bots ended up in the lobby — nothing to simulate.');
+    process.exit(1);
+  }
 
   if (args.code) {
     console.log(`\nWaiting for a real player to start the race from the browser (lobby ${code})...`);
@@ -294,7 +313,7 @@ async function main() {
     const dt = now - lastTick;
     lastTick = now;
     for (const b of liveBots) {
-      if (!b.finished) {
+      if (!b.finished && b.maze) { // b.maze can lag briefly right after the global 'maze' is first set
         b.tryCollectNearbyItems([...items.values()]);
         b.tick(dt, now);
       }
