@@ -675,6 +675,29 @@
     pos.y = Math.max(radius, Math.min(maze.height - radius, pos.y));
   }
 
+  // resolveCollisions only checks the position it's GIVEN — it has no idea
+  // where the player was a moment ago, so it can't catch a wall that got
+  // fully skipped over within one frame. Normally that's fine (a 60fps frame
+  // moves ~4px, walls are 6px thick), but turbo (1.6x speed) plus a slow/
+  // dropped frame (dt is capped at 50ms, but a full 50ms frame at turbo
+  // speed is ~19px) is enough to jump clean through a thin wall without ever
+  // registering as overlapping it — reported as "turbo lets you walk through
+  // walls". Fixed by splitting a large move into small enough steps that
+  // resolveCollisions gets a chance to catch the wall mid-crossing, instead
+  // of only checking after the fact.
+  const COLLISION_SUBSTEP_MAX = 8; // px — comfortably under wall-thickness/2 + player radius (14px)
+  function moveWithCollision(pos, dx, dy, radius) {
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist === 0) return;
+    const steps = Math.max(1, Math.ceil(dist / COLLISION_SUBSTEP_MAX));
+    const stepX = dx / steps, stepY = dy / steps;
+    for (let i = 0; i < steps; i++) {
+      pos.x += stepX;
+      pos.y += stepY;
+      resolveCollisions(pos, radius);
+    }
+  }
+
   // ---------- minimap ----------
   function buildMinimapCache() {
     // shrink the minimap on small/mobile viewports so it doesn't eat too
@@ -812,10 +835,7 @@
 
       if (confused) { dirX = -dirX; dirY = -dirY; }
       const speed = MAX_SPEED * (turbo ? 1.6 : 1);
-      local.x += dirX * speed * speedFactor * dt;
-      local.y += dirY * speed * speedFactor * dt;
-
-      resolveCollisions(local, PLAYER_RADIUS);
+      moveWithCollision(local, dirX * speed * speedFactor * dt, dirY * speed * speedFactor * dt, PLAYER_RADIUS);
 
       // item pickups — same client-detects-then-server-confirms pattern as
       // the finish line, so 40-50 players don't need server-side physics
