@@ -77,28 +77,6 @@
     return { dx: Math.cos(angle) * radius * frac, dy: Math.sin(angle) * radius * frac };
   }
 
-  // The {x1,y1,x2,y2} line list used to draw walls (minimap + main canvas).
-  // Used to be computed server-side and sent over the wire, but it's 100%
-  // derivable from hWalls/vWalls (which the server has to send anyway, for
-  // collision) — for a 49-player-size maze that was ~50KB of pure
-  // duplication in a payload that has to fan out to every socket in the
-  // lobby at once, which was eating noticeably into the countdown budget on
-  // a resource-limited host. Cheap enough to just rebuild once per race.
-  function buildWallSegments(maze) {
-    const { cols, rows, hWalls, vWalls, cellSize } = maze;
-    const segments = [];
-    for (let y = 0; y <= rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        if (hWalls[y][x]) segments.push({ x1: x * cellSize, y1: y * cellSize, x2: (x + 1) * cellSize, y2: y * cellSize });
-      }
-    }
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x <= cols; x++) {
-        if (vWalls[y][x]) segments.push({ x1: x * cellSize, y1: y * cellSize, x2: x * cellSize, y2: (y + 1) * cellSize });
-      }
-    }
-    return segments;
-  }
 
   // ---------- HOME screen ----------
   const inputName = document.getElementById('input-name');
@@ -469,7 +447,6 @@
 
   function startRaceView(m, rsa, players, serverNowAtEmit, alreadyRacing) {
     maze = m;
-    maze.wallSegments = buildWallSegments(maze); // no longer sent by the server — see buildWallSegments above
     raceStartAt = rsa;
     // Re-sync the clock offset right when we get a fresh raceStartAt, using
     // the server's own Date.now() at the moment it sent this — this is what
