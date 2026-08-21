@@ -102,6 +102,8 @@ class Bot {
     this.path = [];
     this.pathIndex = 0;
     this.speed = args.speed * (0.85 + Math.random() * 0.3); // ±15% so bots don't move in lockstep
+    this.spawnX = 0; this.spawnY = 0; // set in setupRace — lets us tell "moving" from "still at spawn"
+    this.raceStartingReceivedAt = null; // set when 'raceStarting' arrives — used for the fan-out latency report
     this.heldItem = null;
     this.holdSince = 0;
     this.finished = false;
@@ -144,6 +146,26 @@ class Bot {
     // small random offset from spawn center so bots don't spawn exactly stacked
     this.x = maze.spawn.x + (Math.random() - 0.5) * maze.spawn.radius;
     this.y = maze.spawn.y + (Math.random() - 0.5) * maze.spawn.radius;
+    this.spawnX = this.x;
+    this.spawnY = this.y;
+  }
+
+  // How far this bot has walked from its own spawn point — used to log
+  // whether bots are actually moving (as opposed to connected-but-stuck).
+  distFromSpawn() {
+    return Math.sqrt((this.x - this.spawnX) ** 2 + (this.y - this.spawnY) ** 2);
+  }
+
+  // > a few px of jitter-from-spawn noise, so this only trips once real
+  // walking has happened.
+  hasMoved() {
+    return this.distFromSpawn() > 8;
+  }
+
+  // 0-100, how far along its own shortest path this bot has gotten.
+  pathProgressPct() {
+    if (this.path.length < 2) return 0;
+    return Math.min(100, (this.pathIndex / (this.path.length - 1)) * 100);
   }
 
   // advance one simulation tick (dtMs milliseconds)
@@ -256,11 +278,13 @@ async function main() {
     process.exit(1);
   }
 
+  let startRaceEmitAt = null;
   if (args.code) {
     console.log(`\nWaiting for a real player to start the race from the browser (lobby ${code})...`);
   } else {
     console.log('\nstarting race...');
     await sleep(400); // let lobbyUpdate broadcasts settle before starting
+    startRaceEmitAt = Date.now();
     liveBots[0].socket.emit('startRace');
   }
 
@@ -274,6 +298,7 @@ async function main() {
 
   liveBots.forEach((b) => {
     b.socket.on('raceStarting', (p) => {
+      b.raceStartingReceivedAt = Date.now(); // for the fan-out latency report below
       maze = p.maze;
       raceStartAt = p.raceStartAt;
       items.clear();
@@ -281,7 +306,11 @@ async function main() {
       b.setupRace(maze);
       if (!raceStartLogged) {
         raceStartLogged = true;
-        console.log(`\nrace starting — maze ${maze.cols}x${maze.rows}, ${maze.items.length} items, countdown ends in ${Math.max(0, raceStartAt - Date.now())}ms`);
+        const remaining = raceStartAt - Date.now();
+        console.log(`\nrace starting — maze ${maze.cols}x${maze.rows}, ${maze.items.length} items, countdown ends in ${Math.max(0, remaining)}ms`);
+        if (remaining < 1000) {
+          console.log(`  ⚠ that's a lot less than the server's full 5s countdown budget — delivering the maze to ${liveBots.length} bot(s) ate most/all of it. This is a real fan-out delay (bigger mazes + more players = a bigger payload sent to everyone at once), not a display glitch — see the delivery-latency report right before "go!" below.`);
+        }
       }
     });
     b.socket.on('itemCollected', ({ itemId }) => { const it = items.get(itemId); if (it) it.collected = true; });
@@ -299,7 +328,27 @@ async function main() {
 
   const raceWaitMs = Math.max(0, raceStartAt - Date.now() + 150);
   await sleep(raceWaitMs);
+
+  // How long it actually took the server to deliver 'raceStarting' (which
+  // carries the full maze + item list) to every bot, measured from the
+  // moment we asked it to start the race. A big spread here — or a delivery
+  // time that eats into the 5s countdown — means the server is straining to
+  // fan a large payload out to this many concurrent players, which is
+  // exactly the kind of thing this load test exists to surface.
+  if (startRaceEmitAt != null) {
+    const delivered = liveBots.filter((b) => b.raceStartingReceivedAt);
+    if (delivered.length) {
+      const latencies = delivered.map((b) => b.raceStartingReceivedAt - startRaceEmitAt);
+      const min = Math.min(...latencies), max = Math.max(...latencies);
+      const avg = latencies.reduce((a, c) => a + c, 0) / latencies.length;
+      console.log(`raceStarting delivered to ${delivered.length}/${liveBots.length} bots — fastest ${min}ms, slowest ${max}ms, avg ${avg.toFixed(0)}ms after 'startRace' was sent`);
+    }
+    const notYet = liveBots.filter((b) => !b.raceStartingReceivedAt).length;
+    if (notYet) console.log(`  ⚠ ${notYet} bot(s) still hadn't received 'raceStarting' when the sim loop started — they'll join in once it arrives`);
+  }
+
   console.log('go! simulating movement...\n');
+  console.log(`  ...0/${liveBots.length} finished, 0/${liveBots.length} moving (avg path progress 0%), 0s elapsed`);
 
   // ---------- simulation loop ----------
   const TICK_MS = 50;
@@ -321,7 +370,22 @@ async function main() {
     if (now - lastHeartbeat > 3000) {
       lastHeartbeat = now;
       const finishedCount = liveBots.filter((b) => b.finished).length;
-      console.log(`  ...${finishedCount}/${liveBots.length} finished, ${Math.round((now - simStart) / 1000)}s elapsed`);
+      const running = liveBots.filter((b) => !b.finished);
+      const movingCount = running.filter((b) => b.hasMoved()).length;
+      const avgProgress = running.length
+        ? running.reduce((sum, b) => sum + b.pathProgressPct(), 0) / running.length
+        : 0;
+      console.log(
+        `  ...${finishedCount}/${liveBots.length} finished, ${movingCount}/${running.length} moving ` +
+        `(avg path progress ${avgProgress.toFixed(0)}%), ${Math.round((now - simStart) / 1000)}s elapsed`
+      );
+      // Bots that are still at spawn a few seconds in are worth flagging —
+      // e.g. the server never let their 'move' through, or they never got a
+      // valid path to the exit.
+      const stuck = running.filter((b) => b.maze && !b.hasMoved() && now - simStart > 2500);
+      if (stuck.length) {
+        console.log(`  ⚠ ${stuck.length} bot(s) still at spawn: ${stuck.slice(0, 5).map((b) => b.name).join(', ')}${stuck.length > 5 ? ', ...' : ''}`);
+      }
     }
     await sleep(TICK_MS);
   }
@@ -337,7 +401,8 @@ async function main() {
   }
   const finishers = liveBots.filter((b) => b.finished).sort((a, b2) => a.place - b2.place);
   const dnf = liveBots.filter((b) => !b.finished);
-  console.log(`finishers: ${finishers.length}/${liveBots.length}  |  DNF: ${dnf.length}`);
+  const neverMoved = liveBots.filter((b) => !b.finished && !b.hasMoved());
+  console.log(`finishers: ${finishers.length}/${liveBots.length}  |  DNF: ${dnf.length}${neverMoved.length ? ` (of which ${neverMoved.length} never left spawn)` : ''}`);
   if (finishers.length) {
     const times = finishers.map((b) => b.finishTime);
     const avg = times.reduce((a, c) => a + c, 0) / times.length;

@@ -113,21 +113,13 @@ function generateMaze({ cols, rows, seed, playerCount }) {
 
   const items = generateItems({ cols, rows, roomSize, rng });
 
-  const wallSegments = [];
-  for (let y = 0; y <= rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      if (hWalls[y][x]) {
-        wallSegments.push({ x1: x * CELL_SIZE, y1: y * CELL_SIZE, x2: (x + 1) * CELL_SIZE, y2: y * CELL_SIZE });
-      }
-    }
-  }
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x <= cols; x++) {
-      if (vWalls[y][x]) {
-        wallSegments.push({ x1: x * CELL_SIZE, y1: y * CELL_SIZE, x2: x * CELL_SIZE, y2: (y + 1) * CELL_SIZE });
-      }
-    }
-  }
+  // wallSegments (the {x1,y1,x2,y2} line list used only for drawing) used to
+  // be computed here and sent over the wire alongside hWalls/vWalls — but
+  // it's 100% derivable from those two arrays, and for a 49-player-size maze
+  // it was ~50KB of pure duplication in a payload that already has to fan
+  // out to every socket in the lobby at once. The client now derives it
+  // locally (see idJitter's neighbor, buildWallSegments, in game.js) from
+  // the hWalls/vWalls it needs to transmit anyway for collision.
 
   const spawn = {
     x: (roomSize * CELL_SIZE) / 2,
@@ -147,7 +139,6 @@ function generateMaze({ cols, rows, seed, playerCount }) {
     wallThickness: WALL_THICKNESS,
     hWalls,
     vWalls,
-    wallSegments,
     width: cols * CELL_SIZE,
     height: rows * CELL_SIZE,
     spawn,
