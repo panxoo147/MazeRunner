@@ -104,6 +104,7 @@ class Bot {
     this.speed = args.speed * (0.85 + Math.random() * 0.3); // ±15% so bots don't move in lockstep
     this.spawnX = 0; this.spawnY = 0; // set in setupRace — lets us tell "moving" from "still at spawn"
     this.raceStartingReceivedAt = null; // set when 'raceStarting' arrives — used for the fan-out latency report
+    this.raceStartReceivedAt = null; // set when the server's explicit 'raceStart' go-signal arrives — clock-skew-proof timing (see main())
     this.heldItem = null;
     this.holdSince = 0;
     this.finished = false;
@@ -294,6 +295,7 @@ async function main() {
   let raceEnded = false;
   let raceEndPayload = null;
   let raceStartLogged = false;
+  let raceReallyStarted = false; // flips true on the server's explicit 'raceStart' go-signal — see below
   const items = new Map();
 
   liveBots.forEach((b) => {
@@ -306,12 +308,23 @@ async function main() {
       b.setupRace(maze);
       if (!raceStartLogged) {
         raceStartLogged = true;
+        // NOTE: this "remaining" figure compares the server's raceStartAt
+        // timestamp against THIS machine's own Date.now() — if this
+        // computer's clock is off from the real-world/server clock even by
+        // a couple seconds (very common, especially when testing against a
+        // remote server instead of localhost), this number is meaningless
+        // and can read as 0ms or negative EVEN WITH JUST 1-2 BOTS, with no
+        // real fan-out delay involved at all. It's a rough FYI only — the
+        // "raceStart delivered..." report below (measured entirely on this
+        // machine's own clock, so immune to any clock difference) is the
+        // trustworthy signal for whether the server is actually slow.
         const remaining = raceStartAt - Date.now();
-        console.log(`\nrace starting — maze ${maze.cols}x${maze.rows}, ${maze.items.length} items, countdown ends in ${Math.max(0, remaining)}ms`);
-        if (remaining < 1000) {
-          console.log(`  ⚠ that's a lot less than the server's full 5s countdown budget — delivering the maze to ${liveBots.length} bot(s) ate most/all of it. This is a real fan-out delay (bigger mazes + more players = a bigger payload sent to everyone at once), not a display glitch — see the delivery-latency report right before "go!" below.`);
-        }
+        console.log(`\nrace starting — maze ${maze.cols}x${maze.rows}, ${maze.items.length} items, countdown reads ${Math.max(0, remaining)}ms left (local-clock estimate — see below for the real number)`);
       }
+    });
+    b.socket.on('raceStart', () => {
+      b.raceStartReceivedAt = Date.now();
+      raceReallyStarted = true;
     });
     b.socket.on('itemCollected', ({ itemId }) => { const it = items.get(itemId); if (it) it.collected = true; });
     b.socket.on('itemRespawned', ({ itemId }) => { const it = items.get(itemId); if (it) it.collected = false; });
@@ -326,25 +339,51 @@ async function main() {
     await sleep(200);
   }
 
-  const raceWaitMs = Math.max(0, raceStartAt - Date.now() + 150);
-  await sleep(raceWaitMs);
+  // Wait for the server's own explicit 'raceStart' signal instead of trying
+  // to estimate it from raceStartAt vs. this machine's clock — same fix as
+  // the warp bug in the real client (public/game.js): don't trust a
+  // cross-machine clock comparison for anything that actually matters,
+  // trust the arrival of an authoritative message instead.
+  const raceStartWaitBegin = Date.now();
+  while (!raceReallyStarted) {
+    if (Date.now() - raceStartWaitBegin > 30000) {
+      console.error("timed out waiting for the server's 'raceStart' signal (30s).");
+      console.error("  If this server was deployed before the raceStart fix, it never sends this event — redeploy the latest server.js and try again.");
+      liveBots.forEach((b) => b.close());
+      process.exit(1);
+    }
+    await sleep(30);
+  }
 
-  // How long it actually took the server to deliver 'raceStarting' (which
-  // carries the full maze + item list) to every bot, measured from the
-  // moment we asked it to start the race. A big spread here — or a delivery
-  // time that eats into the 5s countdown — means the server is straining to
-  // fan a large payload out to this many concurrent players, which is
-  // exactly the kind of thing this load test exists to surface.
+  // How long it actually took the server to deliver 'raceStarting' (the
+  // maze+items payload) and then 'raceStart' (the actual go-signal) to every
+  // bot — both measured against THIS SAME machine's clock at both ends, so
+  // (unlike the "countdown reads...ms" line above) this is accurate
+  // regardless of any clock difference with the server. 'raceStart' should
+  // land at roughly 5000ms (the countdown) + normal network latency after
+  // 'startRace' was sent — if it's dramatically more than that, the server
+  // itself is genuinely slow (e.g. straining to fan a big maze out to a lot
+  // of players at once); if it's close to 5000ms but the countdown line
+  // above read oddly (0ms, negative), that's this machine's clock being off
+  // from the server's, not a server performance issue.
   if (startRaceEmitAt != null) {
     const delivered = liveBots.filter((b) => b.raceStartingReceivedAt);
     if (delivered.length) {
       const latencies = delivered.map((b) => b.raceStartingReceivedAt - startRaceEmitAt);
       const min = Math.min(...latencies), max = Math.max(...latencies);
       const avg = latencies.reduce((a, c) => a + c, 0) / latencies.length;
-      console.log(`raceStarting delivered to ${delivered.length}/${liveBots.length} bots — fastest ${min}ms, slowest ${max}ms, avg ${avg.toFixed(0)}ms after 'startRace' was sent`);
+      console.log(`raceStarting (maze payload) delivered to ${delivered.length}/${liveBots.length} bots — fastest ${min}ms, slowest ${max}ms, avg ${avg.toFixed(0)}ms after 'startRace' was sent`);
     }
-    const notYet = liveBots.filter((b) => !b.raceStartingReceivedAt).length;
-    if (notYet) console.log(`  ⚠ ${notYet} bot(s) still hadn't received 'raceStarting' when the sim loop started — they'll join in once it arrives`);
+    const startedDelivered = liveBots.filter((b) => b.raceStartReceivedAt);
+    if (startedDelivered.length) {
+      const goLatencies = startedDelivered.map((b) => b.raceStartReceivedAt - startRaceEmitAt);
+      const min = Math.min(...goLatencies), max = Math.max(...goLatencies);
+      const avg = goLatencies.reduce((a, c) => a + c, 0) / goLatencies.length;
+      console.log(`raceStart (actual go-signal) delivered to ${startedDelivered.length}/${liveBots.length} bots — fastest ${min}ms, slowest ${max}ms, avg ${avg.toFixed(0)}ms after 'startRace' was sent (expect ~5000ms + normal network latency)`);
+      if (avg > 6500) {
+        console.log(`  ⚠ that's well beyond the 5000ms countdown — the server itself is taking real extra time here (not a clock/display issue).`);
+      }
+    }
   }
 
   console.log('go! simulating movement...\n');
