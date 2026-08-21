@@ -30,6 +30,11 @@
         <span class="control-hint">สลับได้ระหว่างเล่นด้วยปุ่ม <kbd>M</kbd> หรือแตะปุ่มมุมจอ</span>
       </div>
 
+      <label class="checkbox-field">
+        <input id="input-spectator" type="checkbox" />
+        <span>👁️ เข้าร่วมแบบผู้ชม (ดูอย่างเดียว ไม่ลงแข่ง)</span>
+      </label>
+
       <div class="home-actions">
         <button id="btn-create" class="btn btn-primary">สร้างห้องใหม่</button>
 
@@ -59,6 +64,7 @@
 
       <div class="lobby-sub">
         <span id="lobby-count">0</span> / <span id="lobby-max">50</span> ผู้เล่น
+        <span id="lobby-spectator-count" class="spectator-count"></span>
       </div>
 
       <div id="player-list" class="player-list"></div>
@@ -66,6 +72,7 @@
       <div class="lobby-footer">
         <button id="btn-start" class="btn btn-primary" style="display:none">เริ่มการแข่งขัน</button>
         <p id="lobby-wait-msg" class="wait-msg">รอโฮสต์เริ่มเกม...</p>
+        <button id="btn-toggle-spectator" class="btn btn-ghost">👁️ สลับเป็นผู้ชม</button>
         <button id="btn-leave-lobby" class="btn btn-ghost">ออกจากห้อง</button>
       </div>
     </div>
@@ -113,6 +120,7 @@
   <section id="screen-results" class="screen">
     <div class="panel results-panel">
       <h2>🏁 ผลการแข่งขัน</h2>
+      <p id="results-reason" class="results-reason"></p>
       <ol id="results-list" class="results-list"></ol>
       <div class="results-footer">
         <button id="btn-play-again" class="btn btn-primary" style="display:none">แข่งใหม่อีกครั้ง</button>

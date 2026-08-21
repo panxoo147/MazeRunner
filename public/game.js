@@ -25,6 +25,7 @@
   // ---------- state ----------
   let selfId = null;
   let currentLobby = null; // last lobbyUpdate payload
+  let isSpectator = false; // derived from currentLobby's own entry — spectators watch only, no character
   let maze = null;
   let raceStartAt = null;
   let raceActive = false;
@@ -39,9 +40,9 @@
 
   // ---------- power-up items ("พลิกเกม" game-changer mechanic) ----------
   const ITEM_INFO = {
-    turbo: { icon: '⚡', label: 'เร่งความเร็ว', fx: 'fx-turbo' },
-    confuse: { icon: '🌀', label: 'กวนใจคู่แข่ง', fx: 'fx-confuse' },
-    reveal: { icon: '🧭', label: 'เข็มทิศ', fx: 'fx-reveal' },
+    turbo: { icon: '⚡', label: 'เร่งความเร็ว', fx: 'fx-turbo', color: '0,210,168' },
+    confuse: { icon: '🌀', label: 'กวนใจคู่แข่ง', fx: 'fx-confuse', color: '255,90,106' },
+    reveal: { icon: '🧭', label: 'เข็มทิศ', fx: 'fx-reveal', color: '255,209,102' },
   };
   const itemsById = new Map(); // itemId -> {id,x,y,type,collected}
   const pendingCollect = new Set(); // itemIds we've asked the server about but haven't heard back on yet
@@ -50,7 +51,8 @@
   let revealPath = null; // array of {x,y} pixel points from the moment 'reveal' activated
   let effectFxTimer = null;
 
-  const PLAYER_RADIUS = 11;
+  const PLAYER_RADIUS = 11; // local player's size — also drives wall-collision, so leave this alone
+  const OTHER_PLAYER_RADIUS = 6; // smaller + drawn translucent, so a crowd of other players never hides the maze or your own dot
 
   function idJitter(id, radius) {
     let hash = 0;
@@ -63,6 +65,7 @@
   // ---------- HOME screen ----------
   const inputName = document.getElementById('input-name');
   const inputCode = document.getElementById('input-code');
+  const inputSpectator = document.getElementById('input-spectator');
   const homeError = document.getElementById('home-error');
 
   const savedName = sessionStorage.getItem('mazerace_name');
@@ -108,7 +111,7 @@
 
   document.getElementById('btn-create').addEventListener('click', () => {
     homeError.textContent = '';
-    socket.emit('createLobby', { name: getName() }, (res) => {
+    socket.emit('createLobby', { name: getName(), spectator: inputSpectator.checked }, (res) => {
       if (!res.ok) { homeError.textContent = res.error || 'สร้างห้องไม่สำเร็จ'; return; }
       selfId = res.selfId;
       applyLobby(res.lobby);
@@ -124,11 +127,20 @@
     homeError.textContent = '';
     const code = inputCode.value.trim().toUpperCase();
     if (!code) { homeError.textContent = 'กรอกโค้ดห้องก่อน'; return; }
-    socket.emit('joinLobby', { code, name: getName() }, (res) => {
+    socket.emit('joinLobby', { code, name: getName(), spectator: inputSpectator.checked }, (res) => {
       if (!res.ok) { homeError.textContent = res.error || 'เข้าห้องไม่สำเร็จ'; return; }
       selfId = res.selfId;
       applyLobby(res.lobby);
-      showScreen('lobby');
+      // A spectator can join a lobby that's already mid-race or showing
+      // results — bootstrap straight into the right screen instead of the
+      // (blocked-for-racers) waiting room.
+      if (res.lobby.state === 'results' && res.standings) {
+        showResults(res.standings);
+      } else if ((res.lobby.state === 'countdown' || res.lobby.state === 'racing') && res.maze) {
+        startRaceView(res.maze, res.raceStartAt, res.lobby.players);
+      } else {
+        showScreen('lobby');
+      }
     });
   }
 
@@ -136,9 +148,11 @@
   const lobbyCodeEl = document.getElementById('lobby-code');
   const lobbyCountEl = document.getElementById('lobby-count');
   const lobbyMaxEl = document.getElementById('lobby-max');
+  const lobbySpectatorCountEl = document.getElementById('lobby-spectator-count');
   const playerListEl = document.getElementById('player-list');
   const btnStart = document.getElementById('btn-start');
   const lobbyWaitMsg = document.getElementById('lobby-wait-msg');
+  const btnToggleSpectator = document.getElementById('btn-toggle-spectator');
 
   function applyLobby(lobby) {
     currentLobby = lobby;
@@ -148,17 +162,25 @@
   }
 
   function renderPlayerList(lobby) {
-    lobbyCountEl.textContent = lobby.players.length;
+    const racers = lobby.players.filter((p) => !p.isSpectator);
+    const spectators = lobby.players.filter((p) => p.isSpectator);
+    lobbyCountEl.textContent = racers.length;
+    lobbySpectatorCountEl.textContent = spectators.length ? `(+ ${spectators.length} ผู้ชม)` : '';
     playerListEl.innerHTML = '';
     for (const p of lobby.players) {
       const chip = document.createElement('div');
-      chip.className = 'player-chip';
-      chip.innerHTML = `<span class="player-dot" style="background:${p.color}"></span><span>${escapeHtml(p.name)}</span>${p.isHost ? '<span class="host-badge">HOST</span>' : ''}`;
+      chip.className = 'player-chip' + (p.isSpectator ? ' is-spectator' : '');
+      const dot = p.isSpectator ? '' : `<span class="player-dot" style="background:${p.color}"></span>`;
+      const badge = p.isSpectator ? '<span class="spectator-badge">👁️</span>' : (p.isHost ? '<span class="host-badge">HOST</span>' : '');
+      chip.innerHTML = `${dot}<span>${escapeHtml(p.name)}</span>${badge}`;
       playerListEl.appendChild(chip);
     }
+    const me = lobby.players.find((p) => p.id === selfId);
+    isSpectator = !!(me && me.isSpectator);
     const isHost = lobby.hostId === selfId;
     btnStart.style.display = isHost ? 'block' : 'none';
     lobbyWaitMsg.style.display = isHost ? 'none' : 'block';
+    btnToggleSpectator.textContent = isSpectator ? '🎮 สลับกลับมาเล่น' : '👁️ สลับเป็นผู้ชม';
   }
 
   function escapeHtml(s) {
@@ -166,6 +188,7 @@
   }
 
   document.getElementById('btn-start').addEventListener('click', () => socket.emit('startRace'));
+  btnToggleSpectator.addEventListener('click', () => socket.emit('setSpectator', { spectator: !isSpectator }));
   document.getElementById('btn-copy-code').addEventListener('click', () => {
     if (currentLobby) navigator.clipboard?.writeText(currentLobby.code).catch(() => {});
   });
@@ -383,7 +406,7 @@
   }
 
   canvas.addEventListener('touchstart', (e) => {
-    if (controlMode !== 'touch' || !raceActive || selfFinished) return;
+    if (controlMode !== 'touch' || !raceActive || selfFinished || isSpectator) return;
     const t = e.changedTouches[0];
     if (!t) return;
     joystickStart(t.clientX, t.clientY, t.identifier);
@@ -406,7 +429,7 @@
 
   setControlMode(controlMode); // sync UI + hud label to the saved preference
 
-  socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players }) => {
+  function startRaceView(m, rsa, players) {
     maze = m;
     raceStartAt = rsa;
     raceActive = false;
@@ -425,8 +448,10 @@
     activeEffects.turbo = activeEffects.reveal = activeEffects.confuse = 0;
     revealPath = null;
     screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse');
+    screens.game.classList.toggle('spectator-mode', isSpectator);
 
     for (const p of players) {
+      if (p.isSpectator) continue; // spectators aren't racers — no dot, no spawn slot
       const jitter = idJitter(p.id, maze.spawn.radius);
       const x = maze.spawn.x + jitter.dx;
       const y = maze.spawn.y + jitter.dy;
@@ -444,9 +469,11 @@
     showScreen('game');
     resizeCanvas();
     countdownOverlay.classList.remove('hidden');
-    hudStatus.textContent = 'เตรียมตัว...';
+    hudStatus.textContent = isSpectator ? '👁️ เตรียมชมการแข่งขัน...' : 'เตรียมตัว...';
     requestAnimationFrame(loop);
-  });
+  }
+
+  socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players }) => startRaceView(m, rsa, players));
 
   socket.on('tick', ({ positions }) => {
     for (const p of positions) {
@@ -456,11 +483,26 @@
     }
   });
 
-  socket.on('itemCollected', ({ itemId, type, byId }) => {
+  socket.on('itemCollected', ({ itemId, type, byId, respawnInMs }) => {
     const item = itemsById.get(itemId);
-    if (item) item.collected = true;
+    if (item) {
+      item.collected = true;
+      // Timestamps are stamped from the LOCAL clock the instant this event
+      // arrives, using only the server-provided duration — avoids any
+      // client/server clock-skew issues that an absolute server timestamp
+      // would introduce for a purely cosmetic countdown ring.
+      item.collectedAt = Date.now();
+      item.cooldownMs = respawnInMs;
+    }
     pendingCollect.delete(itemId);
     if (byId === selfId) setHeldItem(type);
+  });
+
+  // A collected item reappears after its respawn delay — just flip the local
+  // flag back; render/pickup-detection already treat !collected as "there".
+  socket.on('itemRespawned', ({ itemId }) => {
+    const item = itemsById.get(itemId);
+    if (item) { item.collected = false; item.collectedAt = null; item.cooldownMs = null; }
   });
 
   socket.on('itemEffect', ({ type, duration, byName }) => {
@@ -511,12 +553,20 @@
     }
   }
 
-  socket.on('raceEnded', ({ standings }) => {
+  const RACE_END_REASON = {
+    all_finished: 'ผู้เล่นทุกคนเข้าเส้นชัยแล้ว',
+    top_finishers: `ผู้เล่นอันดับ 1-${4} เข้าเส้นชัยแล้ว การแข่งขันจึงจบลง`,
+    timeout: 'หมดเวลาการแข่งขัน',
+  };
+
+  socket.on('raceEnded', ({ standings, reason }) => {
     raceActive = false;
-    showResults(standings);
+    showResults(standings, reason);
   });
 
-  function showResults(standings) {
+  function showResults(standings, reason) {
+    const reasonEl = document.getElementById('results-reason');
+    reasonEl.textContent = RACE_END_REASON[reason] || '';
     const list = document.getElementById('results-list');
     list.innerHTML = '';
     const medals = ['🥇', '🥈', '🥉'];
@@ -633,10 +683,12 @@
       miniCtx.arc(o.x * miniScale, o.y * miniScale, 2, 0, Math.PI * 2);
       miniCtx.fill();
     }
-    miniCtx.fillStyle = '#00d2a8';
-    miniCtx.beginPath();
-    miniCtx.arc(local.x * miniScale, local.y * miniScale, 3, 0, Math.PI * 2);
-    miniCtx.fill();
+    if (!isSpectator) {
+      miniCtx.fillStyle = '#00d2a8';
+      miniCtx.beginPath();
+      miniCtx.arc(local.x * miniScale, local.y * miniScale, 3, 0, Math.PI * 2);
+      miniCtx.fill();
+    }
   }
 
   // ---------- main loop ----------
@@ -662,20 +714,36 @@
       countdownNumber.textContent = Math.ceil(countdownRemaining / 1000);
       raceActive = false;
     } else {
-      if (!raceActive) { raceActive = true; hudStatus.textContent = 'ไปเลย!'; setTimeout(() => { if (!selfFinished) hudStatus.textContent = 'กำลังวิ่ง...'; }, 900); }
+      if (!raceActive) {
+        raceActive = true;
+        hudStatus.textContent = isSpectator ? '👁️ เริ่มแข่งแล้ว!' : 'ไปเลย!';
+        setTimeout(() => {
+          if (isSpectator) hudStatus.textContent = '👁️ กำลังชมการแข่งขัน';
+          else if (!selfFinished) hudStatus.textContent = 'กำลังวิ่ง...';
+        }, 900);
+      }
       countdownOverlay.classList.add('hidden');
     }
 
-    // Camera position for this frame — computed once and reused for both
-    // the movement direction and the render translate below, so the
-    // direction the character moves always matches where it's actually
-    // drawn on screen relative to the cursor (near maze edges the camera
-    // clamps and the player is NOT at the exact screen center anymore).
-    const camX = maze ? clampCamera(local.x - cssW / 2, maze.width, cssW) : 0;
-    const camY = maze ? clampCamera(local.y - cssH / 2, maze.height, cssH) : 0;
+    // Camera for this frame. Racers get a camera that follows their own
+    // position (computed once and reused for both movement direction and
+    // the render translate, so movement always matches what's on screen).
+    // Spectators have no character to follow, so instead we zoom out to fit
+    // the whole maze in view — offsetX/Y center it, viewScale shrinks it.
+    let camX = 0, camY = 0, viewScale = 1, offsetX = 0, offsetY = 0;
+    if (maze) {
+      if (isSpectator) {
+        viewScale = Math.min(cssW / maze.width, cssH / maze.height) * 0.94;
+        offsetX = (cssW - maze.width * viewScale) / 2;
+        offsetY = (cssH - maze.height * viewScale) / 2;
+      } else {
+        camX = clampCamera(local.x - cssW / 2, maze.width, cssW);
+        camY = clampCamera(local.y - cssH / 2, maze.height, cssH);
+      }
+    }
 
-    // movement
-    if (raceActive && !selfFinished && maze) {
+    // movement — spectators never move a character
+    if (raceActive && !selfFinished && maze && !isSpectator) {
       const nowMs = Date.now();
       const confused = activeEffects.confuse > nowMs;
       const turbo = activeEffects.turbo > nowMs;
@@ -757,7 +825,7 @@
       o.y += (o.targetY - o.y) * Math.min(1, dt * 8);
     }
 
-    render(camX, camY);
+    render(camX, camY, offsetX, offsetY, viewScale);
     drawMinimap();
     requestAnimationFrame(loop);
   }
@@ -770,7 +838,7 @@
     return `${String(m).padStart(2, '0')}:${s.toFixed(1).padStart(4, '0')}`;
   }
 
-  function render(camX, camY) {
+  function render(camX, camY, offsetX, offsetY, viewScale) {
     if (!maze) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
@@ -778,6 +846,8 @@
     ctx.fillRect(0, 0, cssW, cssH);
 
     ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(viewScale, viewScale);
     ctx.translate(-camX, -camY);
 
     // floor
@@ -814,16 +884,49 @@
     }
 
     // item pickups
+    const nowMs = Date.now();
     for (const item of itemsById.values()) {
-      if (item.collected) continue;
       const info = ITEM_INFO[item.type];
+      if (item.collected) {
+        // still on cooldown — show a filling ring + countdown where it was,
+        // so everyone can see when a power-up is about to come back
+        if (!item.cooldownMs) continue;
+        const elapsed = nowMs - item.collectedAt;
+        const remaining = Math.max(0, item.cooldownMs - elapsed);
+        if (remaining <= 0) continue; // about to respawn server-side; avoid a 0s flash
+        const progress = Math.min(1, elapsed / item.cooldownMs);
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, 15, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, 15, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+        ctx.strokeStyle = `rgba(${info.color},0.85)`;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.65)';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${Math.ceil(remaining / 1000)}s`, item.x, item.y + 3);
+        continue;
+      }
+      // rich, saturated per-type color (+ a soft glow) so pickups read clearly
+      // against the dark maze instead of the old plain washed-out white ring
+      ctx.save();
+      ctx.shadowColor = `rgba(${info.color},0.9)`;
+      ctx.shadowBlur = 12;
       ctx.beginPath();
       ctx.arc(item.x, item.y, 15, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillStyle = `rgba(${info.color},0.32)`;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-      ctx.lineWidth = 1.5;
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = `rgba(${info.color},0.95)`;
+      ctx.lineWidth = 2;
       ctx.stroke();
+      ctx.restore();
       ctx.font = '18px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -831,13 +934,16 @@
       ctx.textBaseline = 'alphabetic';
     }
 
-    // other players
+    // other players — small + translucent so a crowd never hides the maze
+    // or the local player's own dot underneath/behind them
+    ctx.globalAlpha = 0.72;
     for (const o of otherPlayers.values()) {
       if (o.finished) continue;
-      drawPlayer(o.x, o.y, o.color, o.name, false);
+      drawPlayer(o.x, o.y, o.color, o.name, false, OTHER_PLAYER_RADIUS);
     }
-    // local player on top
-    drawPlayer(local.x, local.y, '#ffffff', null, true);
+    ctx.globalAlpha = 1;
+    // local player drawn last (on top, full size/opacity) — spectators have no character to draw
+    if (!isSpectator) drawPlayer(local.x, local.y, '#ffffff', null, true, PLAYER_RADIUS);
 
     ctx.restore();
   }
@@ -852,9 +958,9 @@
     ctx.stroke();
   }
 
-  function drawPlayer(x, y, color, name, isSelf) {
+  function drawPlayer(x, y, color, name, isSelf, radius) {
     ctx.beginPath();
-    ctx.arc(x, y, PLAYER_RADIUS, 0, Math.PI * 2);
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     if (isSelf) {
@@ -866,7 +972,7 @@
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(name, x, y - PLAYER_RADIUS - 6);
+      ctx.fillText(name, x, y - radius - 6);
     }
   }
 
@@ -878,6 +984,7 @@
       getHeldItem: () => heldItem,
       getActiveEffects: () => ({ ...activeEffects }),
       getItems: () => [...itemsById.values()],
+      getIsSpectator: () => isSpectator,
       useHeldItem,
     };
   }

@@ -20,10 +20,12 @@ const { generateMaze } = require('./maze');
 
 const PORT = process.env.PORT || 3000;
 const MAX_PLAYERS_PER_LOBBY = 50;
+const MAX_SPECTATORS_PER_LOBBY = 100; // spectators don't affect game balance, so give them a generous separate cap
 const TICK_MS = 100; // 10Hz position broadcast
 const COUNTDOWN_MS = 5000;
 const RACE_TIMEOUT_MS = 10 * 60 * 1000; // auto-end race after 10 minutes (mazes got bigger/harder)
 const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
+const FINISH_LIMIT = 4; // race ends as soon as this many racers cross the line (or everyone does, if fewer are racing)
 
 // Power-up "game-changer" items — how long each effect lasts once used.
 // Effect semantics live client-side (movement is client-authoritative); the
@@ -31,6 +33,7 @@ const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 // player, and — for 'confuse' — picking who gets hit.
 const ITEM_EFFECT_MS = { turbo: 4000, reveal: 5000, confuse: 3000 };
 const ITEM_PICKUP_TOLERANCE = 20; // extra px slack on top of the pickup radius, for latency
+const ITEM_RESPAWN_MS = 10 * 1000; // a collected item reappears after this long, so long races don't run dry
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -84,7 +87,22 @@ function publicPlayer(p) {
     place: p.place,
     finishTime: p.finishTime,
     connected: p.connected,
+    isSpectator: p.isSpectator,
   };
+}
+
+// Results-screen ordering: finishers by place, then anyone who didn't finish.
+// Spectators never raced, so they don't belong on the results list at all.
+function computeStandings(lobby) {
+  return [...lobby.players.values()]
+    .filter((p) => !p.isSpectator)
+    .map(publicPlayer)
+    .sort((a, b) => {
+      if (a.finished && b.finished) return a.place - b.place;
+      if (a.finished) return -1;
+      if (b.finished) return 1;
+      return 0;
+    });
 }
 
 function lobbySnapshot(lobby) {
@@ -120,6 +138,7 @@ function assignNewHost(lobby) {
 }
 
 function endRace(lobby, reason) {
+  if (lobby.state !== 'racing') return; // avoid double-firing (immediate finish check + tick-loop safety net can both trigger)
   if (lobby.tickTimer) {
     clearInterval(lobby.tickTimer);
     lobby.tickTimer = null;
@@ -129,14 +148,7 @@ function endRace(lobby, reason) {
     lobby.timeoutTimer = null;
   }
   lobby.state = 'results';
-  const standings = [...lobby.players.values()]
-    .map(publicPlayer)
-    .sort((a, b) => {
-      if (a.finished && b.finished) return a.place - b.place;
-      if (a.finished) return -1;
-      if (b.finished) return 1;
-      return 0;
-    });
+  const standings = computeStandings(lobby);
   io.to(lobby.code).emit('raceEnded', { reason, standings });
 }
 
@@ -148,17 +160,17 @@ function startTicking(lobby) {
       .map((p) => ({ id: p.id, x: p.x, y: p.y }));
     io.to(lobby.code).emit('tick', { t: Date.now(), positions });
 
-    const allFinished = [...lobby.players.values()]
-      .filter((p) => p.connected)
-      .every((p) => p.finished);
-    if (allFinished && lobby.players.size > 0) {
+    // Safety net alongside the immediate check in markPlayerFinished — spectators
+    // never finish, so they're excluded or this would never fire.
+    const totalRacers = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
+    if (totalRacers > 0 && lobby.finishCount >= totalRacers) {
       endRace(lobby, 'all_finished');
     }
   }, TICK_MS);
 }
 
 function startRace(lobby) {
-  const playerCount = [...lobby.players.values()].filter((p) => p.connected).length;
+  const playerCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
   const seed = Math.floor(Math.random() * 2 ** 31);
   lobby.maze = generateMaze({ seed, playerCount });
   lobby.state = 'countdown';
@@ -169,9 +181,11 @@ function startRace(lobby) {
     p.finished = false;
     p.place = null;
     p.finishTime = null;
-    p.x = lobby.maze.spawn.x;
-    p.y = lobby.maze.spawn.y;
-    p.heldItem = null;
+    if (!p.isSpectator) {
+      p.x = lobby.maze.spawn.x;
+      p.y = lobby.maze.spawn.y;
+      p.heldItem = null;
+    }
   }
   lobby.finishCount = 0;
 
@@ -194,12 +208,13 @@ function startRace(lobby) {
 io.on('connection', (socket) => {
   socket.data.lobbyCode = null;
 
-  socket.on('createLobby', ({ name } = {}, cb) => {
+  socket.on('createLobby', ({ name, spectator } = {}, cb) => {
     const code = createLobbyCode();
+    const isSpectator = !!spectator;
     const player = {
       id: socket.id,
       name: sanitizeName(name),
-      color: colorForIndex(0),
+      color: isSpectator ? null : colorForIndex(0),
       isHost: true,
       connected: true,
       finished: false,
@@ -208,6 +223,7 @@ io.on('connection', (socket) => {
       x: null,
       y: null,
       heldItem: null,
+      isSpectator,
     };
     const lobby = {
       code,
@@ -220,6 +236,7 @@ io.on('connection', (socket) => {
       tickTimer: null,
       timeoutTimer: null,
       createdAt: Date.now(),
+      colorSeq: isSpectator ? 0 : 1, // next colorForIndex() slot to hand out
     };
     lobbies.set(code, lobby);
     socket.join(code);
@@ -227,20 +244,29 @@ io.on('connection', (socket) => {
     cb && cb({ ok: true, lobby: lobbySnapshot(lobby), selfId: socket.id });
   });
 
-  socket.on('joinLobby', ({ code, name } = {}, cb) => {
+  socket.on('joinLobby', ({ code, name, spectator } = {}, cb) => {
     const normalized = (code || '').toString().trim().toUpperCase();
     const lobby = lobbies.get(normalized);
     if (!lobby) return cb && cb({ ok: false, error: 'ไม่พบห้องนี้ ตรวจสอบโค้ดอีกครั้ง' });
-    if (lobby.state !== 'waiting') return cb && cb({ ok: false, error: 'ห้องนี้เริ่มแข่งไปแล้ว รอรอบถัดไป' });
-    const connectedCount = [...lobby.players.values()].filter((p) => p.connected).length;
-    if (connectedCount >= MAX_PLAYERS_PER_LOBBY) {
-      return cb && cb({ ok: false, error: `ห้องเต็มแล้ว (สูงสุด ${MAX_PLAYERS_PER_LOBBY} คน)` });
+    const isSpectator = !!spectator;
+    // Spectators can drop in any time (waiting/countdown/racing/results) since
+    // they don't affect game balance; only actual racers need a fresh lobby.
+    if (!isSpectator && lobby.state !== 'waiting') {
+      return cb && cb({ ok: false, error: 'ห้องนี้เริ่มแข่งไปแล้ว รอรอบถัดไป (เข้าชมแบบผู้ชมได้เลย)' });
     }
-    const color = colorForIndex(connectedCount);
+    if (isSpectator) {
+      const specCount = [...lobby.players.values()].filter((p) => p.connected && p.isSpectator).length;
+      if (specCount >= MAX_SPECTATORS_PER_LOBBY) return cb && cb({ ok: false, error: 'ผู้ชมเต็มแล้ว' });
+    } else {
+      const connectedCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
+      if (connectedCount >= MAX_PLAYERS_PER_LOBBY) {
+        return cb && cb({ ok: false, error: `ห้องเต็มแล้ว (สูงสุด ${MAX_PLAYERS_PER_LOBBY} คน)` });
+      }
+    }
     const player = {
       id: socket.id,
       name: sanitizeName(name),
-      color,
+      color: isSpectator ? null : colorForIndex(lobby.colorSeq++),
       isHost: false,
       connected: true,
       finished: false,
@@ -249,11 +275,42 @@ io.on('connection', (socket) => {
       x: null,
       y: null,
       heldItem: null,
+      isSpectator,
     };
     lobby.players.set(socket.id, player);
     socket.join(lobby.code);
     socket.data.lobbyCode = lobby.code;
-    cb && cb({ ok: true, lobby: lobbySnapshot(lobby), selfId: socket.id });
+    const payload = { ok: true, lobby: lobbySnapshot(lobby), selfId: socket.id };
+    // A spectator joining mid-race needs the current maze/race state to
+    // bootstrap their view immediately, since they missed 'raceStarting'.
+    if (isSpectator && lobby.maze && (lobby.state === 'countdown' || lobby.state === 'racing')) {
+      payload.maze = lobby.maze;
+      payload.raceStartAt = lobby.raceStartAt;
+    } else if (isSpectator && lobby.state === 'results') {
+      payload.standings = computeStandings(lobby);
+    }
+    cb && cb(payload);
+    broadcastLobby(lobby);
+  });
+
+  // Toggle between racer/spectator while still in the waiting room. Blocked
+  // once a race is live so nobody can dodge a bad position by "watching" —
+  // spectators who want in have to wait for the next race.
+  socket.on('setSpectator', ({ spectator } = {}) => {
+    const lobby = getLobbyOfSocket(socket);
+    if (!lobby || lobby.state !== 'waiting') return;
+    const player = lobby.players.get(socket.id);
+    if (!player) return;
+    const isSpectator = !!spectator;
+    if (player.isSpectator === isSpectator) return;
+    if (!isSpectator) {
+      const connectedCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
+      if (connectedCount >= MAX_PLAYERS_PER_LOBBY) return;
+      player.color = colorForIndex(lobby.colorSeq++);
+    } else {
+      player.color = null;
+    }
+    player.isSpectator = isSpectator;
     broadcastLobby(lobby);
   });
 
@@ -262,7 +319,8 @@ io.on('connection', (socket) => {
     if (!lobby) return;
     if (lobby.hostId !== socket.id) return;
     if (lobby.state !== 'waiting' && lobby.state !== 'results') return;
-    if (lobby.players.size < 1) return;
+    const racerCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
+    if (racerCount < 1) return;
     startRace(lobby);
   });
 
@@ -307,6 +365,13 @@ io.on('connection', (socket) => {
       place: player.place,
       finishTime: player.finishTime,
     });
+
+    // End the race as soon as the top FINISH_LIMIT racers are in (or everyone
+    // is, if fewer than that are racing) — no need to wait for stragglers.
+    const totalRacers = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
+    if (totalRacers > 0 && lobby.finishCount >= Math.min(FINISH_LIMIT, totalRacers)) {
+      endRace(lobby, lobby.finishCount >= totalRacers ? 'all_finished' : 'top_finishers');
+    }
   }
 
   function distanceToExit(m, x, y) {
@@ -361,7 +426,22 @@ io.on('connection', (socket) => {
 
     item.collected = true;
     player.heldItem = item.type;
-    io.to(lobby.code).emit('itemCollected', { itemId, type: item.type, byId: player.id, byName: player.name });
+    // respawnInMs lets every client (not just the collector) draw a cooldown
+    // ring on the ground where the item was, instead of it just vanishing.
+    io.to(lobby.code).emit('itemCollected', {
+      itemId, type: item.type, byId: player.id, byName: player.name, respawnInMs: ITEM_RESPAWN_MS,
+    });
+
+    // Respawn after a delay so a long race doesn't run dry on power-ups.
+    // Captures the itemsById Map instance itself (not just the lobby) so a
+    // stray timer from a since-finished race can never touch the next one —
+    // startRace() always swaps in a brand new Map.
+    const itemsAtPickup = lobby.itemsById;
+    setTimeout(() => {
+      if (lobby.itemsById !== itemsAtPickup || !item.collected) return;
+      item.collected = false;
+      io.to(lobby.code).emit('itemRespawned', { itemId });
+    }, ITEM_RESPAWN_MS);
   });
 
   // Use whatever power-up is currently held. 'turbo' and 'reveal' only
@@ -425,6 +505,14 @@ io.on('connection', (socket) => {
       lobbies.delete(lobby.code);
       return;
     }
+
+    // If everyone left who was still actually racing (vs. finished/spectating),
+    // don't leave the race hanging until the timeout — end it now.
+    if (lobby.state === 'racing') {
+      const activeRacers = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator && !p.finished);
+      if (activeRacers.length === 0) endRace(lobby, 'all_finished');
+    }
+
     broadcastLobby(lobby);
   }
 });
