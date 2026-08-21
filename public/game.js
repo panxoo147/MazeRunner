@@ -27,7 +27,15 @@
   let currentLobby = null; // last lobbyUpdate payload
   let isSpectator = false; // derived from currentLobby's own entry — spectators watch only, no character
   let maze = null;
-  let raceStartAt = null;
+  let raceStartAt = null; // an absolute timestamp from the SERVER's clock — only ever compare it to serverNow(), never raw Date.now()
+  // The countdown and in-race timer are both "time until/since a server
+  // timestamp" — if the player's own system clock is off from the server's
+  // (very common: wrong system time, no time sync, different machine
+  // entirely) that comparison silently breaks, making the countdown skip or
+  // the timer read wrong. We correct for it by re-measuring the offset
+  // between server and client clocks every time we get a fresh raceStartAt.
+  let serverTimeOffset = 0;
+  function serverNow() { return Date.now() + serverTimeOffset; }
   let raceActive = false;
   let selfFinished = false;
   let finishSent = false;
@@ -137,7 +145,7 @@
       if (res.lobby.state === 'results' && res.standings) {
         showResults(res.standings);
       } else if ((res.lobby.state === 'countdown' || res.lobby.state === 'racing') && res.maze) {
-        startRaceView(res.maze, res.raceStartAt, res.lobby.players);
+        startRaceView(res.maze, res.raceStartAt, res.lobby.players, res.now);
       } else {
         showScreen('lobby');
       }
@@ -429,9 +437,14 @@
 
   setControlMode(controlMode); // sync UI + hud label to the saved preference
 
-  function startRaceView(m, rsa, players) {
+  function startRaceView(m, rsa, players, serverNowAtEmit) {
     maze = m;
     raceStartAt = rsa;
+    // Re-sync the clock offset right when we get a fresh raceStartAt, using
+    // the server's own Date.now() at the moment it sent this — this is what
+    // makes the countdown/timer correct regardless of the player's system
+    // clock (see the serverTimeOffset comment above).
+    if (typeof serverNowAtEmit === 'number') serverTimeOffset = serverNowAtEmit - Date.now();
     raceActive = false;
     selfFinished = false;
     finishSent = false;
@@ -473,7 +486,7 @@
     requestAnimationFrame(loop);
   }
 
-  socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players }) => startRaceView(m, rsa, players));
+  socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players, now }) => startRaceView(m, rsa, players, now));
 
   socket.on('tick', ({ positions }) => {
     for (const p of positions) {
@@ -708,7 +721,7 @@
     const dt = Math.min(0.05, (now - lastTime) / 1000);
     lastTime = now;
 
-    const countdownRemaining = raceStartAt - Date.now();
+    const countdownRemaining = raceStartAt - serverNow();
     if (countdownRemaining > 0) {
       countdownOverlay.classList.remove('hidden');
       countdownNumber.textContent = Math.ceil(countdownRemaining / 1000);
@@ -814,9 +827,9 @@
         socket.emit('move', { x: local.x, y: local.y });
       }
 
-      hudTimer.textContent = formatTime(Date.now() - raceStartAt);
+      hudTimer.textContent = formatTime(serverNow() - raceStartAt);
     } else if (raceStartAt) {
-      hudTimer.textContent = countdownRemaining > 0 ? '00:00.0' : formatTime(Date.now() - raceStartAt);
+      hudTimer.textContent = countdownRemaining > 0 ? '00:00.0' : formatTime(serverNow() - raceStartAt);
     }
 
     // interpolate other players toward their latest known target

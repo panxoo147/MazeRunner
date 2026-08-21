@@ -193,6 +193,10 @@ function startRace(lobby) {
     maze: lobby.maze,
     raceStartAt: lobby.raceStartAt,
     players: [...lobby.players.values()].map(publicPlayer),
+    // Lets each client correct for its own clock being off from the
+    // server's (very common on real machines) when it measures the
+    // countdown/timer against raceStartAt — see game.js's serverTimeOffset.
+    now: Date.now(),
   });
 
   setTimeout(() => {
@@ -286,6 +290,7 @@ io.on('connection', (socket) => {
     if (isSpectator && lobby.maze && (lobby.state === 'countdown' || lobby.state === 'racing')) {
       payload.maze = lobby.maze;
       payload.raceStartAt = lobby.raceStartAt;
+      payload.now = Date.now(); // same clock-skew correction as the 'raceStarting' broadcast
     } else if (isSpectator && lobby.state === 'results') {
       payload.standings = computeStandings(lobby);
     }
