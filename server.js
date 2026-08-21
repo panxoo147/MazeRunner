@@ -218,6 +218,21 @@ function startRace(lobby) {
   setTimeout(() => {
     if (!lobbies.has(lobby.code) || lobby.state !== 'countdown') return;
     lobby.state = 'racing';
+    // Explicit "go" signal, separate from the raceStartAt timestamp clients use
+    // for the cosmetic 5..4..3..2..1 numeral. Each client's own estimate of
+    // "serverNow() >= raceStartAt" carries a one-way-latency bias (see game.js's
+    // serverTimeOffset comment) that's invisible on localhost but real over the
+    // internet — a client with worse latency to the server crosses its local
+    // "zero" a bit LATE relative to when the server actually flips to racing.
+    // During that lag, 'tick' broadcasts (emitted below) already start updating
+    // everyone else's position, and the client keeps interpolating toward them
+    // behind its still-visible countdown overlay. When the overlay finally
+    // lifts (late), it reveals players who already moved — a visible "warp".
+    // Gating the reveal on receipt of this event instead of on the local clock
+    // estimate removes that bias: the reveal now only depends on this one
+    // message's own (normal, small) network latency, not on accumulated offset
+    // error.
+    io.to(lobby.code).emit('raceStart', { now: Date.now() });
     startTicking(lobby);
     lobby.timeoutTimer = setTimeout(() => {
       if (lobby.state === 'racing') endRace(lobby, 'timeout');
@@ -307,6 +322,9 @@ io.on('connection', (socket) => {
       payload.maze = lobby.maze;
       payload.raceStartAt = lobby.raceStartAt;
       payload.now = Date.now(); // same clock-skew correction as the 'raceStarting' broadcast
+      // Lets the client know it missed the 'raceStart' broadcast (it already
+      // fired before this spectator joined) so it shouldn't sit waiting for it.
+      payload.alreadyRacing = lobby.state === 'racing';
     } else if (isSpectator && lobby.state === 'results') {
       payload.standings = computeStandings(lobby);
     }

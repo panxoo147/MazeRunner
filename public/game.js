@@ -37,6 +37,13 @@
   let serverTimeOffset = 0;
   function serverNow() { return Date.now() + serverTimeOffset; }
   let raceActive = false;
+  // True only once THIS client has received the server's explicit 'raceStart'
+  // signal for the current race — see the comment on that emit in server.js.
+  // The countdown-overlay reveal and other-player interpolation are gated on
+  // this instead of on the local serverNow() >= raceStartAt estimate, so a
+  // client with worse latency never reveals a scene that already quietly
+  // advanced behind its still-covering overlay.
+  let raceStartSignalReceived = false;
   let selfFinished = false;
   let finishSent = false;
   const otherPlayers = new Map(); // id -> {x,y,color,name,finished}
@@ -145,7 +152,7 @@
       if (res.lobby.state === 'results' && res.standings) {
         showResults(res.standings);
       } else if ((res.lobby.state === 'countdown' || res.lobby.state === 'racing') && res.maze) {
-        startRaceView(res.maze, res.raceStartAt, res.lobby.players, res.now);
+        startRaceView(res.maze, res.raceStartAt, res.lobby.players, res.now, res.alreadyRacing);
       } else {
         showScreen('lobby');
       }
@@ -437,7 +444,7 @@
 
   setControlMode(controlMode); // sync UI + hud label to the saved preference
 
-  function startRaceView(m, rsa, players, serverNowAtEmit) {
+  function startRaceView(m, rsa, players, serverNowAtEmit, alreadyRacing) {
     maze = m;
     raceStartAt = rsa;
     // Re-sync the clock offset right when we get a fresh raceStartAt, using
@@ -446,6 +453,11 @@
     // clock (see the serverTimeOffset comment above).
     if (typeof serverNowAtEmit === 'number') serverTimeOffset = serverNowAtEmit - Date.now();
     raceActive = false;
+    // Normal join: wait for the server's explicit 'raceStart' event (see the
+    // socket listener below). Late/spectator join into an already-racing
+    // lobby: that event already fired before we got here, so don't wait for
+    // one that's never coming — reveal immediately.
+    raceStartSignalReceived = !!alreadyRacing;
     selfFinished = false;
     finishSent = false;
     keys.w = keys.a = keys.s = keys.d = false;
@@ -487,6 +499,14 @@
   }
 
   socket.on('raceStarting', ({ maze: m, raceStartAt: rsa, players, now }) => startRaceView(m, rsa, players, now));
+
+  socket.on('raceStart', () => {
+    raceStartSignalReceived = true;
+    // Snap other players straight to their latest known target — no lingering
+    // interpolation debt from any 'tick' that arrived while our own countdown
+    // overlay was still covering the canvas.
+    for (const o of otherPlayers.values()) { o.x = o.targetX; o.y = o.targetY; }
+  });
 
   socket.on('tick', ({ positions }) => {
     for (const p of positions) {
@@ -722,9 +742,12 @@
     lastTime = now;
 
     const countdownRemaining = raceStartAt - serverNow();
-    if (countdownRemaining > 0) {
+    if (!raceStartSignalReceived) {
+      // Numeral is cosmetic only — it's fine if it's a bit off between
+      // players. The overlay itself stays up until the server's explicit
+      // 'raceStart' event arrives, no matter what our own clock estimate says.
       countdownOverlay.classList.remove('hidden');
-      countdownNumber.textContent = Math.ceil(countdownRemaining / 1000);
+      if (countdownRemaining > 0) countdownNumber.textContent = Math.ceil(countdownRemaining / 1000);
       raceActive = false;
     } else {
       if (!raceActive) {
@@ -832,10 +855,15 @@
       hudTimer.textContent = countdownRemaining > 0 ? '00:00.0' : formatTime(serverNow() - raceStartAt);
     }
 
-    // interpolate other players toward their latest known target
-    for (const o of otherPlayers.values()) {
-      o.x += (o.targetX - o.x) * Math.min(1, dt * 8);
-      o.y += (o.targetY - o.y) * Math.min(1, dt * 8);
+    // interpolate other players toward their latest known target — held off
+    // until our own 'raceStart' signal arrives, so no motion accumulates
+    // silently behind the still-visible countdown overlay (see raceStart
+    // handler above for why that matters).
+    if (raceStartSignalReceived) {
+      for (const o of otherPlayers.values()) {
+        o.x += (o.targetX - o.x) * Math.min(1, dt * 8);
+        o.y += (o.targetY - o.y) * Math.min(1, dt * 8);
+      }
     }
 
     render(camX, camY, offsetX, offsetY, viewScale);
@@ -998,6 +1026,8 @@
       getActiveEffects: () => ({ ...activeEffects }),
       getItems: () => [...itemsById.values()],
       getIsSpectator: () => isSpectator,
+      getOtherPlayers: () => [...otherPlayers.entries()].map(([id, o]) => ({ id, x: o.x, y: o.y, targetX: o.targetX, targetY: o.targetY })),
+      getRaceStartSignalReceived: () => raceStartSignalReceived,
       useHeldItem,
     };
   }
