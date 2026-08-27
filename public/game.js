@@ -26,6 +26,7 @@
   let selfId = null;
   let currentLobby = null; // last lobbyUpdate payload
   let isSpectator = false; // derived from currentLobby's own entry — spectators watch only, no character
+  let selfEmoji = null; // set once per race from the players list in startRaceView — which character emoji to draw for the local player
   let maze = null;
   let raceStartAt = null; // an absolute timestamp from the SERVER's clock — only ever compare it to serverNow(), never raw Date.now()
   // The countdown and in-race timer are both "time until/since a server
@@ -59,6 +60,10 @@
     confuse: { icon: '🌀', label: 'กวนใจคู่แข่ง', fx: 'fx-confuse', color: '255,90,106' },
     reveal: { icon: '🧭', label: 'เข็มทิศ', fx: 'fx-reveal', color: '255,209,102' },
   };
+  // Pickups on the map are anonymous "mystery boxes" — the server rolls the
+  // actual type at the moment of pickup (see 'itemCollected' below), so
+  // there's nothing type-specific to show here before that.
+  const MYSTERY_ITEM = { icon: '🎁', color: '220,220,224' };
   const itemsById = new Map(); // itemId -> {id,x,y,type,collected}
   const pendingCollect = new Set(); // itemIds we've asked the server about but haven't heard back on yet
   let heldItem = null; // type string or null
@@ -125,10 +130,99 @@
     setControlMode(CONTROL_MODES[(CONTROL_MODES.indexOf(controlMode) + 1) % CONTROL_MODES.length]);
   });
 
-  document.getElementById('btn-create').addEventListener('click', () => {
+  // ---------- character emoji ----------
+  // A fixed, curated set — kept as a whitelist (not free text) so the server
+  // can validate it cheaply and nobody can smuggle arbitrary strings/HTML
+  // into something every other player's client renders.
+  const EMOJI_OPTIONS = ['😀', '😁', '😂', '🤣', '😊', '😇', '🙂', '😉', '😍', '🤩', '😘', '😜', '🤪', '🤔', '🤨', '😏', '😴', '🥱', '🤯', '🥳', '😎', '🤠', '🥸', '🤓', '😈', '👿', '🤡', '👻', '💀', '🤖', '👽', '👾', '🎃', '🧟', '🧛', '🧙', '🧚', '🧞', '🦸', '🦹', '🐱', '🐶', '🦊', '🐼', '🐸', '🦁', '🐯', '🐨', '🐰', '🦄', '🐻', '🐮', '🐷', '🐵', '🐔', '🐧', '🦉', '🦅', '🦇', '🐺', '🐗', '🦝', '🦔', '🐢', '🦎', '🐍', '🐙', '🐳', '🐬', '🦈', '🐠', '🐡', '🦀', '🦑', '🐚', '🐌', '🐝', '🦋', '🐞', '🐜', '🍉', '🍕', '🍔', '🍟', '🌮', '🍩', '🍦', '🍪', '🍰', '🍫', '🍇', '🍓', '🍒', '🥑', '🌽', '🚀', '⭐', '🔥', '💎', '⚡'];
+  const emojiPicker = document.getElementById('emoji-picker');
+  const btnAvatar = document.getElementById('btn-avatar');
+  const modalEmojiPicker = document.getElementById('modal-emoji-picker');
+  const btnEmojiModalClose = document.getElementById('btn-emoji-modal-close');
+  let selectedEmoji = sessionStorage.getItem('mazerace_emoji') || EMOJI_OPTIONS[0];
+  if (!EMOJI_OPTIONS.includes(selectedEmoji)) selectedEmoji = EMOJI_OPTIONS[0];
+
+  function setEmoji(emoji) {
+    if (!EMOJI_OPTIONS.includes(emoji)) return;
+    selectedEmoji = emoji;
+    sessionStorage.setItem('mazerace_emoji', selectedEmoji);
+    btnAvatar.textContent = selectedEmoji;
+    emojiPicker.querySelectorAll('.emoji-opt').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.emoji === selectedEmoji);
+    });
+  }
+
+  for (const emoji of EMOJI_OPTIONS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'emoji-opt' + (emoji === selectedEmoji ? ' active' : '');
+    btn.dataset.emoji = emoji;
+    btn.textContent = emoji;
+    emojiPicker.appendChild(btn);
+  }
+  btnAvatar.textContent = selectedEmoji;
+
+  // The full picker now lives in a modal opened from the small avatar button
+  // next to the name field, instead of sitting open on the home screen.
+  function openEmojiModal() { modalEmojiPicker.classList.remove('hidden'); }
+  function closeEmojiModal() { modalEmojiPicker.classList.add('hidden'); }
+  btnAvatar.addEventListener('click', openEmojiModal);
+  btnEmojiModalClose.addEventListener('click', closeEmojiModal);
+  modalEmojiPicker.addEventListener('click', (e) => {
+    if (e.target === modalEmojiPicker) closeEmojiModal();
+  });
+  emojiPicker.addEventListener('click', (e) => {
+    const btn = e.target.closest('.emoji-opt');
+    if (!btn) return;
+    setEmoji(btn.dataset.emoji);
+    closeEmojiModal(); // picking one is the whole action — close right away
+  });
+
+  // ---------- create-room modal ----------
+  // "สร้างห้องใหม่" no longer creates the lobby immediately — it opens a
+  // modal so the host can set maxPlayers/finishLimit first, then confirms.
+  const inputMaxPlayers = document.getElementById('input-max-players');
+  const inputFinishLimit = document.getElementById('input-finish-limit');
+  const modalRoomSettings = document.getElementById('modal-room-settings');
+  const modalError = document.getElementById('modal-error');
+  const btnModalConfirm = document.getElementById('btn-modal-confirm');
+  const btnModalCancel = document.getElementById('btn-modal-cancel');
+
+  function openRoomSettingsModal() {
+    modalError.textContent = '';
+    modalRoomSettings.classList.remove('hidden');
+    inputMaxPlayers.focus();
+  }
+  function closeRoomSettingsModal() {
+    modalRoomSettings.classList.add('hidden');
+  }
+
+  document.getElementById('btn-create').addEventListener('click', openRoomSettingsModal);
+  btnModalCancel.addEventListener('click', closeRoomSettingsModal);
+  // Click on the dim backdrop (not the panel itself) also cancels.
+  modalRoomSettings.addEventListener('click', (e) => {
+    if (e.target === modalRoomSettings) closeRoomSettingsModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!modalRoomSettings.classList.contains('hidden')) closeRoomSettingsModal();
+    else if (!modalEmojiPicker.classList.contains('hidden')) closeEmojiModal();
+  });
+
+  btnModalConfirm.addEventListener('click', () => {
+    modalError.textContent = '';
     homeError.textContent = '';
-    socket.emit('createLobby', { name: getName(), spectator: inputSpectator.checked }, (res) => {
-      if (!res.ok) { homeError.textContent = res.error || 'สร้างห้องไม่สำเร็จ'; return; }
+    const maxPlayers = parseInt(inputMaxPlayers.value, 10);
+    const finishLimit = parseInt(inputFinishLimit.value, 10);
+    socket.emit('createLobby', {
+      name: getName(),
+      spectator: inputSpectator.checked,
+      emoji: selectedEmoji,
+      maxPlayers,
+      finishLimit,
+    }, (res) => {
+      if (!res.ok) { modalError.textContent = res.error || 'สร้างห้องไม่สำเร็จ'; return; }
+      closeRoomSettingsModal();
       selfId = res.selfId;
       applyLobby(res.lobby);
       showScreen('lobby');
@@ -143,7 +237,7 @@
     homeError.textContent = '';
     const code = inputCode.value.trim().toUpperCase();
     if (!code) { homeError.textContent = 'กรอกโค้ดห้องก่อน'; return; }
-    socket.emit('joinLobby', { code, name: getName(), spectator: inputSpectator.checked }, (res) => {
+    socket.emit('joinLobby', { code, name: getName(), spectator: inputSpectator.checked, emoji: selectedEmoji }, (res) => {
       if (!res.ok) { homeError.textContent = res.error || 'เข้าห้องไม่สำเร็จ'; return; }
       selfId = res.selfId;
       applyLobby(res.lobby);
@@ -187,8 +281,9 @@
       const chip = document.createElement('div');
       chip.className = 'player-chip' + (p.isSpectator ? ' is-spectator' : '');
       const dot = p.isSpectator ? '' : `<span class="player-dot" style="background:${p.color}"></span>`;
-      const badge = p.isSpectator ? '<span class="spectator-badge">👁️</span>' : (p.isHost ? '<span class="host-badge">HOST</span>' : '');
-      chip.innerHTML = `${dot}<span>${escapeHtml(p.name)}</span>${badge}`;
+      const emoji = p.isSpectator ? '' : `<span class="player-emoji">${p.emoji || ''}</span>`;
+      const badge = p.isSpectator ? '<span class="spectator-badge">👁️</span>' : (p.isHost ? '<span class="host-badge" title="โฮสต์">👑</span>' : '');
+      chip.innerHTML = `${dot}${emoji}<span>${escapeHtml(p.name)}</span>${badge}`;
       playerListEl.appendChild(chip);
     }
     const me = lobby.players.find((p) => p.id === selfId);
@@ -241,6 +336,9 @@
   const hudItemIcon = document.getElementById('hud-item-icon');
   const hudItemName = document.getElementById('hud-item-name');
   const btnUseItem = document.getElementById('btn-use-item');
+  // "(Space)" is a keyboard hint that means nothing on a touch device — drop
+  // it there so the button (and the item panel around it) stays compact.
+  if (isTouchDevice) btnUseItem.textContent = 'ใช้';
 
   let toastTimer = null;
   function showToast(text) {
@@ -343,15 +441,20 @@
   }, { passive: false });
 
   // ---------- WASD input ----------
+  // Keyed by e.code (physical key position), NOT e.key (the character the
+  // layout produces) — with a non-English input language active (Thai, etc.)
+  // the physical W/A/S/D keys report a completely different e.key, which
+  // silently broke WASD movement unless the OS layout was switched to
+  // English first. e.code stays 'KeyW'/'KeyA'/... regardless of layout.
   const keys = { w: false, a: false, s: false, d: false };
   const KEY_MAP = {
-    w: 'w', ArrowUp: 'w',
-    a: 'a', ArrowLeft: 'a',
-    s: 's', ArrowDown: 's',
-    d: 'd', ArrowRight: 'd',
+    KeyW: 'w', ArrowUp: 'w',
+    KeyA: 'a', ArrowLeft: 'a',
+    KeyS: 's', ArrowDown: 's',
+    KeyD: 'd', ArrowRight: 'd',
   };
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'm' || e.key === 'M') {
+    if (e.code === 'KeyM') {
       if (screens.game.classList.contains('active')) {
         setControlMode(CONTROL_MODES[(CONTROL_MODES.indexOf(controlMode) + 1) % CONTROL_MODES.length]);
       }
@@ -360,18 +463,18 @@
     // only capture WASD/arrows/space while actually on the game screen, so
     // typing "w"/"a"/"s"/"d" or hitting space in the name/code fields is unaffected
     if (!screens.game.classList.contains('active')) return;
-    if (e.key === ' ' || e.code === 'Space') {
+    if (e.code === 'Space') {
       useHeldItem();
       e.preventDefault();
       return;
     }
-    const mapped = KEY_MAP[e.key];
+    const mapped = KEY_MAP[e.code];
     if (!mapped) return;
     keys[mapped] = true;
     e.preventDefault();
   });
   window.addEventListener('keyup', (e) => {
-    const mapped = KEY_MAP[e.key];
+    const mapped = KEY_MAP[e.code];
     if (!mapped) return;
     keys[mapped] = false;
   });
@@ -483,8 +586,9 @@
       const y = maze.spawn.y + jitter.dy;
       if (p.id === selfId) {
         local.x = x; local.y = y;
+        selfEmoji = p.emoji || null;
       } else {
-        otherPlayers.set(p.id, { x, y, targetX: x, targetY: y, color: p.color, name: p.name, finished: false });
+        otherPlayers.set(p.id, { x, y, targetX: x, targetY: y, color: p.color, name: p.name, emoji: p.emoji || null, finished: false });
       }
     }
 
@@ -565,8 +669,8 @@
     }
   });
 
-  socket.on('playerFinished', ({ id, name, place, finishTime }) => {
-    liveLeaderboard.push({ id, name, place, finishTime });
+  socket.on('playerFinished', ({ id, name, emoji, place, finishTime }) => {
+    liveLeaderboard.push({ id, name, emoji, place, finishTime });
     if (otherPlayers.has(id)) otherPlayers.get(id).finished = true;
     if (id === selfId) {
       selfFinished = true;
@@ -582,33 +686,81 @@
     for (const e of top) {
       const li = document.createElement('li');
       const secs = (e.finishTime / 1000).toFixed(1);
-      li.textContent = `${e.name}${e.id === selfId ? ' (คุณ)' : ''} — ${secs}s`;
+      const emojiPrefix = e.emoji ? `${e.emoji} ` : '';
+      li.textContent = `${emojiPrefix}${e.name}${e.id === selfId ? ' (คุณ)' : ''} — ${secs}s`;
       hudLeaderboard.appendChild(li);
     }
   }
 
-  const RACE_END_REASON = {
-    all_finished: 'ผู้เล่นทุกคนเข้าเส้นชัยแล้ว',
-    top_finishers: `ผู้เล่นอันดับ 1-${4} เข้าเส้นชัยแล้ว การแข่งขันจึงจบลง`,
-    timeout: 'หมดเวลาการแข่งขัน',
-  };
+  // top_finishers depends on the lobby's (host-configurable) finish limit,
+  // so it's built from currentLobby at render time instead of a fixed string.
+  function raceEndReasonText(reason) {
+    if (reason === 'all_finished') return 'ผู้เล่นทุกคนเข้าเส้นชัยแล้ว';
+    if (reason === 'top_finishers') {
+      const limit = (currentLobby && currentLobby.finishLimit) || 4;
+      return `ผู้เล่นอันดับ 1-${limit} เข้าเส้นชัยแล้ว การแข่งขันจึงจบลง`;
+    }
+    if (reason === 'timeout') return 'หมดเวลาการแข่งขัน';
+    return '';
+  }
 
   socket.on('raceEnded', ({ standings, reason }) => {
     raceActive = false;
     showResults(standings, reason);
   });
 
+  // Podium visual for the top 3 finishers — 1st in the middle (tallest), 2nd
+  // on the left, 3rd on the right, each with the player's emoji/color "face"
+  // and name above their block. Only finishers get a podium slot; anyone
+  // beyond 3rd (or who didn't finish) is left to the plain list below.
+  const PODIUM_RANKS = [
+    { idx: 1, cls: 'rank-2', height: 64, label: '2' },
+    { idx: 0, cls: 'rank-1', height: 92, label: '1' },
+    { idx: 2, cls: 'rank-3', height: 44, label: '3' },
+  ];
+
+  function renderPodium(standings) {
+    const podiumEl = document.getElementById('results-podium');
+    podiumEl.innerHTML = '';
+    const finishedCount = standings.filter((p) => p.finished).length;
+    const podiumCount = Math.min(3, finishedCount);
+    if (podiumCount === 0) { podiumEl.style.display = 'none'; return; }
+    podiumEl.style.display = 'flex';
+    for (const rank of PODIUM_RANKS) {
+      if (rank.idx >= podiumCount) continue;
+      const p = standings[rank.idx];
+      const slot = document.createElement('div');
+      slot.className = 'podium-slot ' + rank.cls;
+      const name = escapeHtml(p.name) + (p.id === selfId ? ' (คุณ)' : '');
+      const secs = (p.finishTime / 1000).toFixed(1) + 's';
+      slot.innerHTML = `
+        <div class="podium-face" style="border-color:${p.color || '#8b8b90'}">${p.emoji || ''}</div>
+        <div class="podium-name">${name}</div>
+        <div class="podium-block ${rank.cls}" style="height:${rank.height}px">
+          <span class="podium-rank">${rank.label}</span>
+          <span class="podium-time">${secs}</span>
+        </div>`;
+      podiumEl.appendChild(slot);
+    }
+    return podiumCount;
+  }
+
   function showResults(standings, reason) {
     const reasonEl = document.getElementById('results-reason');
-    reasonEl.textContent = RACE_END_REASON[reason] || '';
+    reasonEl.textContent = raceEndReasonText(reason);
+    const podiumCount = renderPodium(standings) || 0;
     const list = document.getElementById('results-list');
     list.innerHTML = '';
-    const medals = ['🥇', '🥈', '🥉'];
-    standings.forEach((p, idx) => {
+    // The <ol> numbers automatically — start it after the podium slots so a
+    // 4th-place entry reads "4." instead of restarting at "1."
+    list.setAttribute('start', String(podiumCount + 1));
+    // Skip whoever already got a podium slot — the remaining list covers
+    // 4th place onward plus anyone who didn't finish.
+    standings.slice(podiumCount).forEach((p) => {
       const li = document.createElement('li');
-      const medal = p.finished && idx < 3 ? `<span class="medal">${medals[idx]}</span>` : '';
       const timeText = p.finished ? `${(p.finishTime / 1000).toFixed(1)}s` : 'ไม่จบการแข่งขัน';
-      li.innerHTML = `${medal}<strong>${escapeHtml(p.name)}${p.id === selfId ? ' (คุณ)' : ''}</strong> — ${timeText}`;
+      const emojiPrefix = p.emoji ? `${p.emoji} ` : '';
+      li.innerHTML = `<strong>${emojiPrefix}${escapeHtml(p.name)}${p.id === selfId ? ' (คุณ)' : ''}</strong> — ${timeText}`;
       list.appendChild(li);
     });
     const isHost = currentLobby && currentLobby.hostId === selfId;
@@ -712,9 +864,9 @@
     miniCanvasCache = document.createElement('canvas');
     miniCanvasCache.width = targetW; miniCanvasCache.height = targetH;
     const mctx = miniCanvasCache.getContext('2d');
-    mctx.fillStyle = '#0a0c16';
+    mctx.fillStyle = '#232326';
     mctx.fillRect(0, 0, targetW, targetH);
-    mctx.strokeStyle = 'rgba(150,160,220,0.55)';
+    mctx.strokeStyle = 'rgba(199,199,204,0.6)';
     mctx.lineWidth = 1;
     mctx.beginPath();
     for (const s of maze.wallSegments) {
@@ -904,7 +1056,10 @@
     if (!maze) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    ctx.fillStyle = '#0a0c16';
+    // Same grayscale palette as the lobby panels — page bg outside the maze
+    // bounds, panel tone for the floor — so the game screen reads as the
+    // same theme instead of a separate near-black canvas.
+    ctx.fillStyle = '#121214';
     ctx.fillRect(0, 0, cssW, cssH);
 
     ctx.save();
@@ -913,7 +1068,7 @@
     ctx.translate(-camX, -camY);
 
     // floor
-    ctx.fillStyle = '#12162a';
+    ctx.fillStyle = '#232326';
     ctx.fillRect(0, 0, maze.width, maze.height);
 
     // spawn / exit zones
@@ -924,8 +1079,9 @@
     ctx.textAlign = 'center';
     ctx.fillText('EXIT', maze.exitZone.x, maze.exitZone.y - maze.exitZone.radius - 10);
 
-    // walls
-    ctx.strokeStyle = '#5b6bd6';
+    // walls — softened light gray instead of near-white; staring at a bright
+    // white maze for a whole race was straining on the eyes.
+    ctx.strokeStyle = '#c7c7cc';
     ctx.lineWidth = maze.wallThickness;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -948,7 +1104,7 @@
     // item pickups
     const nowMs = Date.now();
     for (const item of itemsById.values()) {
-      const info = ITEM_INFO[item.type];
+      const info = MYSTERY_ITEM;
       if (item.collected) {
         // still on cooldown — show a filling ring + countdown where it was,
         // so everyone can see when a power-up is about to come back
@@ -1001,11 +1157,11 @@
     ctx.globalAlpha = 0.72;
     for (const o of otherPlayers.values()) {
       if (o.finished) continue;
-      drawPlayer(o.x, o.y, o.color, o.name, false, OTHER_PLAYER_RADIUS);
+      drawPlayer(o.x, o.y, o.color, o.name, false, OTHER_PLAYER_RADIUS, o.emoji);
     }
     ctx.globalAlpha = 1;
     // local player drawn last (on top, full size/opacity) — spectators have no character to draw
-    if (!isSpectator) drawPlayer(local.x, local.y, '#ffffff', null, true, PLAYER_RADIUS);
+    if (!isSpectator) drawPlayer(local.x, local.y, '#ffffff', null, true, PLAYER_RADIUS, selfEmoji);
 
     ctx.restore();
   }
@@ -1020,15 +1176,33 @@
     ctx.stroke();
   }
 
-  function drawPlayer(x, y, color, name, isSelf, radius) {
+  function drawPlayer(x, y, color, name, isSelf, radius, emoji) {
+    // A colored ring keeps players tellable-apart-at-a-glance in a crowd even
+    // when several people picked the same emoji — the emoji itself is the
+    // "character", the ring is just the same color-coding the game already
+    // used before emoji existed.
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    if (isSelf) {
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = '#6c5ce7';
+    if (emoji) {
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.fill();
+      ctx.lineWidth = isSelf ? 2.5 : 2;
+      ctx.strokeStyle = isSelf ? '#9b95b3' : color;
       ctx.stroke();
+      ctx.font = `${Math.round(radius * 1.7)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(emoji, x, y + 1);
+      ctx.textBaseline = 'alphabetic';
+    } else {
+      // fallback for a player with no emoji set (shouldn't normally happen)
+      ctx.fillStyle = color;
+      ctx.fill();
+      if (isSelf) {
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#9b95b3';
+        ctx.stroke();
+      }
     }
     if (name) {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';

@@ -16,16 +16,23 @@ const path = require('path');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const { generateMaze } = require('./maze');
+const { generateMaze, ITEM_TYPES } = require('./maze');
 
 const PORT = process.env.PORT || 3000;
-const MAX_PLAYERS_PER_LOBBY = 50;
+// Max players / finish-limit are now host-configurable per lobby (set at
+// createLobby time). These stay as the default pre-filled value and the
+// hard upper/lower bounds used to clamp whatever the host submits — never
+// trust a raw client-supplied number without clamping it server-side.
+const DEFAULT_MAX_PLAYERS = 50;
+const MIN_MAX_PLAYERS = 2;
+const HARD_MAX_PLAYERS = 100;
+const DEFAULT_FINISH_LIMIT = 4;
+const MIN_FINISH_LIMIT = 1;
 const MAX_SPECTATORS_PER_LOBBY = 100; // spectators don't affect game balance, so give them a generous separate cap
 const TICK_MS = 100; // 10Hz position broadcast
 const COUNTDOWN_MS = 5000;
 const RACE_TIMEOUT_MS = 10 * 60 * 1000; // auto-end race after 10 minutes (mazes got bigger/harder)
 const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
-const FINISH_LIMIT = 4; // race ends as soon as this many racers cross the line (or everyone does, if fewer are racing)
 
 // Power-up "game-changer" items — how long each effect lasts once used.
 // Effect semantics live client-side (movement is client-authoritative); the
@@ -92,6 +99,29 @@ function sanitizeName(raw) {
   return name || 'Player';
 }
 
+// Same fixed list as public/game.js's EMOJI_OPTIONS — kept as a whitelist
+// (not free text) so a client can't smuggle arbitrary strings/HTML into
+// something broadcast straight to every other player's screen.
+const EMOJI_OPTIONS = ['😀', '😁', '😂', '🤣', '😊', '😇', '🙂', '😉', '😍', '🤩', '😘', '😜', '🤪', '🤔', '🤨', '😏', '😴', '🥱', '🤯', '🥳', '😎', '🤠', '🥸', '🤓', '😈', '👿', '🤡', '👻', '💀', '🤖', '👽', '👾', '🎃', '🧟', '🧛', '🧙', '🧚', '🧞', '🦸', '🦹', '🐱', '🐶', '🦊', '🐼', '🐸', '🦁', '🐯', '🐨', '🐰', '🦄', '🐻', '🐮', '🐷', '🐵', '🐔', '🐧', '🦉', '🦅', '🦇', '🐺', '🐗', '🦝', '🦔', '🐢', '🦎', '🐍', '🐙', '🐳', '🐬', '🦈', '🐠', '🐡', '🦀', '🦑', '🐚', '🐌', '🐝', '🦋', '🐞', '🐜', '🍉', '🍕', '🍔', '🍟', '🌮', '🍩', '🍦', '🍪', '🍰', '🍫', '🍇', '🍓', '🍒', '🥑', '🌽', '🚀', '⭐', '🔥', '💎', '⚡'];
+function sanitizeEmoji(raw) {
+  return EMOJI_OPTIONS.includes(raw) ? raw : EMOJI_OPTIONS[0];
+}
+
+// Host-configurable room settings — always clamp raw client input, never
+// trust it directly.
+function sanitizeMaxPlayers(raw) {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return DEFAULT_MAX_PLAYERS;
+  return Math.min(HARD_MAX_PLAYERS, Math.max(MIN_MAX_PLAYERS, n));
+}
+
+function sanitizeFinishLimit(raw, maxPlayers) {
+  const n = Math.round(Number(raw));
+  const upperBound = Math.max(MIN_FINISH_LIMIT, maxPlayers);
+  if (!Number.isFinite(n)) return Math.min(DEFAULT_FINISH_LIMIT, upperBound);
+  return Math.min(upperBound, Math.max(MIN_FINISH_LIMIT, n));
+}
+
 function publicPlayer(p) {
   return {
     id: p.id,
@@ -103,6 +133,7 @@ function publicPlayer(p) {
     finishTime: p.finishTime,
     connected: p.connected,
     isSpectator: p.isSpectator,
+    emoji: p.emoji,
   };
 }
 
@@ -125,7 +156,8 @@ function lobbySnapshot(lobby) {
     code: lobby.code,
     state: lobby.state,
     hostId: lobby.hostId,
-    maxPlayers: MAX_PLAYERS_PER_LOBBY,
+    maxPlayers: lobby.maxPlayers,
+    finishLimit: lobby.finishLimit,
     players: [...lobby.players.values()].map(publicPlayer),
     raceStartAt: lobby.raceStartAt,
   };
@@ -243,12 +275,13 @@ function startRace(lobby) {
 io.on('connection', (socket) => {
   socket.data.lobbyCode = null;
 
-  socket.on('createLobby', ({ name, spectator } = {}, cb) => {
+  socket.on('createLobby', ({ name, spectator, emoji, maxPlayers, finishLimit } = {}, cb) => {
     const code = createLobbyCode();
     const isSpectator = !!spectator;
     const player = {
       id: socket.id,
       name: sanitizeName(name),
+      emoji: sanitizeEmoji(emoji),
       color: isSpectator ? null : colorForIndex(0),
       isHost: true,
       connected: true,
@@ -260,6 +293,8 @@ io.on('connection', (socket) => {
       heldItem: null,
       isSpectator,
     };
+    const cleanMaxPlayers = sanitizeMaxPlayers(maxPlayers);
+    const cleanFinishLimit = sanitizeFinishLimit(finishLimit, cleanMaxPlayers);
     const lobby = {
       code,
       hostId: socket.id,
@@ -272,6 +307,8 @@ io.on('connection', (socket) => {
       timeoutTimer: null,
       createdAt: Date.now(),
       colorSeq: isSpectator ? 0 : 1, // next colorForIndex() slot to hand out
+      maxPlayers: cleanMaxPlayers,
+      finishLimit: cleanFinishLimit,
     };
     lobbies.set(code, lobby);
     socket.join(code);
@@ -279,7 +316,7 @@ io.on('connection', (socket) => {
     cb && cb({ ok: true, lobby: lobbySnapshot(lobby), selfId: socket.id });
   });
 
-  socket.on('joinLobby', ({ code, name, spectator } = {}, cb) => {
+  socket.on('joinLobby', ({ code, name, spectator, emoji } = {}, cb) => {
     const normalized = (code || '').toString().trim().toUpperCase();
     const lobby = lobbies.get(normalized);
     if (!lobby) return cb && cb({ ok: false, error: 'ไม่พบห้องนี้ ตรวจสอบโค้ดอีกครั้ง' });
@@ -294,13 +331,14 @@ io.on('connection', (socket) => {
       if (specCount >= MAX_SPECTATORS_PER_LOBBY) return cb && cb({ ok: false, error: 'ผู้ชมเต็มแล้ว' });
     } else {
       const connectedCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
-      if (connectedCount >= MAX_PLAYERS_PER_LOBBY) {
-        return cb && cb({ ok: false, error: `ห้องเต็มแล้ว (สูงสุด ${MAX_PLAYERS_PER_LOBBY} คน)` });
+      if (connectedCount >= lobby.maxPlayers) {
+        return cb && cb({ ok: false, error: `ห้องเต็มแล้ว (สูงสุด ${lobby.maxPlayers} คน)` });
       }
     }
     const player = {
       id: socket.id,
       name: sanitizeName(name),
+      emoji: sanitizeEmoji(emoji),
       color: isSpectator ? null : colorForIndex(lobby.colorSeq++),
       isHost: false,
       connected: true,
@@ -344,7 +382,7 @@ io.on('connection', (socket) => {
     if (player.isSpectator === isSpectator) return;
     if (!isSpectator) {
       const connectedCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
-      if (connectedCount >= MAX_PLAYERS_PER_LOBBY) return;
+      if (connectedCount >= lobby.maxPlayers) return;
       player.color = colorForIndex(lobby.colorSeq++);
     } else {
       player.color = null;
@@ -401,14 +439,15 @@ io.on('connection', (socket) => {
     io.to(lobby.code).emit('playerFinished', {
       id: player.id,
       name: player.name,
+      emoji: player.emoji,
       place: player.place,
       finishTime: player.finishTime,
     });
 
-    // End the race as soon as the top FINISH_LIMIT racers are in (or everyone
-    // is, if fewer than that are racing) — no need to wait for stragglers.
+    // End the race as soon as the top lobby.finishLimit racers are in (or
+    // everyone is, if fewer than that are racing) — no need to wait for stragglers.
     const totalRacers = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
-    if (totalRacers > 0 && lobby.finishCount >= Math.min(FINISH_LIMIT, totalRacers)) {
+    if (totalRacers > 0 && lobby.finishCount >= Math.min(lobby.finishLimit, totalRacers)) {
       endRace(lobby, lobby.finishCount >= totalRacers ? 'all_finished' : 'top_finishers');
     }
   }
@@ -464,11 +503,16 @@ io.on('connection', (socket) => {
     if (Math.sqrt(dx * dx + dy * dy) > lobby.maze.itemPickupRadius + ITEM_PICKUP_TOLERANCE) return;
 
     item.collected = true;
-    player.heldItem = item.type;
+    // The type is rolled fresh right here, at pickup time — not fixed to
+    // this spot — so grabbing the same pickup point again later can hand
+    // out something different. Rolled server-side so a client can't peek at
+    // or influence what it's about to get.
+    const awardedType = ITEM_TYPES[Math.floor(Math.random() * ITEM_TYPES.length)];
+    player.heldItem = awardedType;
     // respawnInMs lets every client (not just the collector) draw a cooldown
     // ring on the ground where the item was, instead of it just vanishing.
     io.to(lobby.code).emit('itemCollected', {
-      itemId, type: item.type, byId: player.id, byName: player.name, respawnInMs: ITEM_RESPAWN_MS,
+      itemId, type: awardedType, byId: player.id, byName: player.name, respawnInMs: ITEM_RESPAWN_MS,
     });
 
     // Respawn after a delay so a long race doesn't run dry on power-ups.

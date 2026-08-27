@@ -179,16 +179,19 @@ function generateItems({ cols, rows, roomSize, rng }) {
     [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
   }
 
+  // Pickups are now anonymous "mystery boxes" — the type is rolled by the
+  // server at the moment a player actually collects one (see server.js's
+  // 'collectItem' handler), not fixed to a location here. That's what makes
+  // it "random": the same spot can hand out a different power-up every time
+  // it's grabbed, instead of always being e.g. "the turbo spot".
   const count = Math.max(10, Math.min(45, Math.floor(candidates.length / 18)));
   const items = [];
   for (let i = 0; i < count && i < candidates.length; i++) {
     const [cx, cy] = candidates[i];
-    const type = ITEM_TYPES[Math.floor(rng() * ITEM_TYPES.length)];
     items.push({
       id: `item_${i}`,
       x: (cx + 0.5) * CELL_SIZE,
       y: (cy + 0.5) * CELL_SIZE,
-      type,
     });
   }
   return items;

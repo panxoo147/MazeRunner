@@ -15,10 +15,13 @@
       <h1>🌀 Maze Race</h1>
       <p class="subtitle">แข่งออกจากเขาวงกตให้เร็วที่สุด — บังคับด้วยเมาส์หรือ WASD</p>
 
-      <label class="field">
+      <div class="field">
         <span>ชื่อของคุณ</span>
-        <input id="input-name" type="text" maxlength="16" placeholder="เช่น Pan" autocomplete="off" />
-      </label>
+        <div class="name-avatar-row">
+          <input id="input-name" type="text" maxlength="16" placeholder="เช่น Pan" autocomplete="off" />
+          <button type="button" id="btn-avatar" class="avatar-btn" title="เลือกตัวละคร"></button>
+        </div>
+      </div>
 
       <div class="field">
         <span>โหมดควบคุม</span>
@@ -121,6 +124,7 @@
     <div class="panel results-panel">
       <h2>🏁 ผลการแข่งขัน</h2>
       <p id="results-reason" class="results-reason"></p>
+      <div id="results-podium" class="results-podium"></div>
       <ol id="results-list" class="results-list"></ol>
       <div class="results-footer">
         <button id="btn-play-again" class="btn btn-primary" style="display:none">แข่งใหม่อีกครั้ง</button>
@@ -130,6 +134,37 @@
       </div>
     </div>
   </section>
+
+  <!-- EMOJI PICKER MODAL -->
+  <div id="modal-emoji-picker" class="modal-overlay hidden">
+    <div class="modal-panel">
+      <h2>เลือกตัวละคร</h2>
+      <div class="emoji-picker" id="emoji-picker"></div>
+      <div class="modal-actions">
+        <button id="btn-emoji-modal-close" class="btn btn-primary">เสร็จสิ้น</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CREATE ROOM MODAL -->
+  <div id="modal-room-settings" class="modal-overlay hidden">
+    <div class="modal-panel">
+      <h2>ตั้งค่าห้อง</h2>
+      <label class="field">
+        <span>ผู้เล่นสูงสุด</span>
+        <input id="input-max-players" type="number" min="2" max="100" value="50" inputmode="numeric" />
+      </label>
+      <label class="field">
+        <span>จำนวนคนเข้าเส้นชัยเพื่อจบเกม</span>
+        <input id="input-finish-limit" type="number" min="1" max="100" value="4" inputmode="numeric" />
+      </label>
+      <p id="modal-error" class="error-text"></p>
+      <div class="modal-actions">
+        <button id="btn-modal-cancel" class="btn btn-ghost">ยกเลิก</button>
+        <button id="btn-modal-confirm" class="btn btn-primary">สร้างห้อง</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="game.js"></script>
