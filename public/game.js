@@ -54,11 +54,11 @@
   let miniScale = 1;
   let liveLeaderboard = [];
 
-  // ---------- power-up items ("พลิกเกม" game-changer mechanic) ----------
+  // ---------- power-up items (the "game-changer" mechanic) ----------
   const ITEM_INFO = {
-    turbo: { icon: '⚡', label: 'เร่งความเร็ว', fx: 'fx-turbo', color: '0,210,168' },
-    confuse: { icon: '🌀', label: 'กวนใจคู่แข่ง', fx: 'fx-confuse', color: '255,90,106' },
-    reveal: { icon: '🧭', label: 'เข็มทิศ', fx: 'fx-reveal', color: '255,209,102' },
+    turbo: { icon: '⚡', label: 'Speed Boost', fx: 'fx-turbo', color: '0,210,168' },
+    confuse: { icon: '🌀', label: 'Confuse Rival', fx: 'fx-confuse', color: '255,90,106' },
+    reveal: { icon: '🧭', label: 'Compass', fx: 'fx-reveal', color: '255,209,102' },
   };
   // Pickups on the map are anonymous "mystery boxes" — the server rolls the
   // actual type at the moment of pickup (see 'itemCollected' below), so
@@ -107,7 +107,7 @@
   if (!CONTROL_MODES.includes(controlMode)) controlMode = 'mouse';
   const controlToggle = document.getElementById('control-toggle');
   const hudControlBtn = document.getElementById('hud-control-toggle');
-  const CONTROL_LABEL = { mouse: '🖱️ เมาส์', wasd: '⌨️ WASD', touch: '📱 จอย' };
+  const CONTROL_LABEL = { mouse: '🖱️ Mouse', wasd: '⌨️ WASD', touch: '📱 Joy' };
 
   function setControlMode(mode) {
     controlMode = CONTROL_MODES.includes(mode) ? mode : 'mouse';
@@ -179,7 +179,7 @@
   });
 
   // ---------- create-room modal ----------
-  // "สร้างห้องใหม่" no longer creates the lobby immediately — it opens a
+  // "Create Room" no longer creates the lobby immediately — it opens a
   // modal so the host can set maxPlayers/finishLimit first, then confirms.
   const inputMaxPlayers = document.getElementById('input-max-players');
   const inputFinishLimit = document.getElementById('input-finish-limit');
@@ -221,7 +221,7 @@
       maxPlayers,
       finishLimit,
     }, (res) => {
-      if (!res.ok) { modalError.textContent = res.error || 'สร้างห้องไม่สำเร็จ'; return; }
+      if (!res.ok) { modalError.textContent = res.error || 'Failed to create room'; return; }
       closeRoomSettingsModal();
       selfId = res.selfId;
       applyLobby(res.lobby);
@@ -236,9 +236,9 @@
   function joinLobby() {
     homeError.textContent = '';
     const code = inputCode.value.trim().toUpperCase();
-    if (!code) { homeError.textContent = 'กรอกโค้ดห้องก่อน'; return; }
+    if (!code) { homeError.textContent = 'Enter a room code first'; return; }
     socket.emit('joinLobby', { code, name: getName(), spectator: inputSpectator.checked, emoji: selectedEmoji }, (res) => {
-      if (!res.ok) { homeError.textContent = res.error || 'เข้าห้องไม่สำเร็จ'; return; }
+      if (!res.ok) { homeError.textContent = res.error || 'Failed to join room'; return; }
       selfId = res.selfId;
       applyLobby(res.lobby);
       // A spectator can join a lobby that's already mid-race or showing
@@ -275,14 +275,14 @@
     const racers = lobby.players.filter((p) => !p.isSpectator);
     const spectators = lobby.players.filter((p) => p.isSpectator);
     lobbyCountEl.textContent = racers.length;
-    lobbySpectatorCountEl.textContent = spectators.length ? `(+ ${spectators.length} ผู้ชม)` : '';
+    lobbySpectatorCountEl.textContent = spectators.length ? `(+ ${spectators.length} spectators)` : '';
     playerListEl.innerHTML = '';
     for (const p of lobby.players) {
       const chip = document.createElement('div');
       chip.className = 'player-chip' + (p.isSpectator ? ' is-spectator' : '');
       const dot = p.isSpectator ? '' : `<span class="player-dot" style="background:${p.color}"></span>`;
       const emoji = p.isSpectator ? '' : `<span class="player-emoji">${p.emoji || ''}</span>`;
-      const badge = p.isSpectator ? '<span class="spectator-badge">👁️</span>' : (p.isHost ? '<span class="host-badge" title="โฮสต์">👑</span>' : '');
+      const badge = p.isSpectator ? '<span class="spectator-badge">👁️</span>' : (p.isHost ? '<span class="host-badge" title="Host">👑</span>' : '');
       chip.innerHTML = `${dot}${emoji}<span>${escapeHtml(p.name)}</span>${badge}`;
       playerListEl.appendChild(chip);
     }
@@ -291,7 +291,7 @@
     const isHost = lobby.hostId === selfId;
     btnStart.style.display = isHost ? 'block' : 'none';
     lobbyWaitMsg.style.display = isHost ? 'none' : 'block';
-    btnToggleSpectator.textContent = isSpectator ? '🎮 สลับกลับมาเล่น' : '👁️ สลับเป็นผู้ชม';
+    btnToggleSpectator.textContent = isSpectator ? '🎮 Switch to Player' : '👁️ Switch to Spectator';
   }
 
   function escapeHtml(s) {
@@ -338,7 +338,7 @@
   const btnUseItem = document.getElementById('btn-use-item');
   // "(Space)" is a keyboard hint that means nothing on a touch device — drop
   // it there so the button (and the item panel around it) stays compact.
-  if (isTouchDevice) btnUseItem.textContent = 'ใช้';
+  if (isTouchDevice) btnUseItem.textContent = 'Use';
 
   let toastTimer = null;
   function showToast(text) {
@@ -599,7 +599,7 @@
     showScreen('game');
     resizeCanvas();
     countdownOverlay.classList.remove('hidden');
-    hudStatus.textContent = isSpectator ? '👁️ เตรียมชมการแข่งขัน...' : 'เตรียมตัว...';
+    hudStatus.textContent = isSpectator ? '👁️ Get ready to watch...' : 'Get ready...';
     requestAnimationFrame(loop);
   }
 
@@ -648,11 +648,11 @@
     applyEffectVisual(ITEM_INFO[type].fx, duration);
     if (type === 'reveal') {
       revealPath = computeShortestPathToExit(local.x, local.y);
-      showToast(`🧭 เข็มทิศ! ทางไปทางออกปรากฏขึ้น`);
+      showToast(`🧭 Compass! Path to the exit revealed`);
     } else if (type === 'turbo') {
-      showToast(`⚡ เร่งความเร็ว!`);
+      showToast(`⚡ Speed Boost!`);
     } else if (type === 'confuse') {
-      showToast(`🌀 ${byName || 'ใครบางคน'} ทำให้คุณสับสน! ควบคุมกลับด้าน`);
+      showToast(`🌀 ${byName || 'Someone'} confused you! Controls reversed`);
     }
   });
 
@@ -661,11 +661,11 @@
     if (type === 'confuse') {
       // shown to everyone, including the attacker — the target gets their
       // own more specific toast from the 'itemEffect' handler above
-      showToast(targetName ? `${info.icon} ${byName} ทำให้ ${targetName} สับสน!` : `${info.icon} ${byName} ใช้ ${info.label} แต่ไม่มีเป้าหมาย`);
+      showToast(targetName ? `${info.icon} ${byName} confused ${targetName}!` : `${info.icon} ${byName} used ${info.label} but had no target`);
     } else if (byId !== selfId) {
       // self already saw their own toast via 'itemEffect' — this is just
       // ambient flavor for everyone else watching
-      showToast(`${info.icon} ${byName} ใช้ ${info.label}`);
+      showToast(`${info.icon} ${byName} used ${info.label}`);
     }
   });
 
@@ -674,7 +674,7 @@
     if (otherPlayers.has(id)) otherPlayers.get(id).finished = true;
     if (id === selfId) {
       selfFinished = true;
-      hudStatus.textContent = `เข้าเส้นชัยอันดับที่ ${place}! 🎉`;
+      hudStatus.textContent = `Finished in place ${place}! 🎉`;
       joystickEnd();
     }
     renderLiveLeaderboard();
@@ -687,7 +687,7 @@
       const li = document.createElement('li');
       const secs = (e.finishTime / 1000).toFixed(1);
       const emojiPrefix = e.emoji ? `${e.emoji} ` : '';
-      li.textContent = `${emojiPrefix}${e.name}${e.id === selfId ? ' (คุณ)' : ''} — ${secs}s`;
+      li.textContent = `${emojiPrefix}${e.name}${e.id === selfId ? ' (You)' : ''} — ${secs}s`;
       hudLeaderboard.appendChild(li);
     }
   }
@@ -695,12 +695,12 @@
   // top_finishers depends on the lobby's (host-configurable) finish limit,
   // so it's built from currentLobby at render time instead of a fixed string.
   function raceEndReasonText(reason) {
-    if (reason === 'all_finished') return 'ผู้เล่นทุกคนเข้าเส้นชัยแล้ว';
+    if (reason === 'all_finished') return 'All players have finished';
     if (reason === 'top_finishers') {
       const limit = (currentLobby && currentLobby.finishLimit) || 4;
-      return `ผู้เล่นอันดับ 1-${limit} เข้าเส้นชัยแล้ว การแข่งขันจึงจบลง`;
+      return `The top ${limit} finishers have crossed the line — race over`;
     }
-    if (reason === 'timeout') return 'หมดเวลาการแข่งขัน';
+    if (reason === 'timeout') return "Time's up";
     return '';
   }
 
@@ -731,7 +731,7 @@
       const p = standings[rank.idx];
       const slot = document.createElement('div');
       slot.className = 'podium-slot ' + rank.cls;
-      const name = escapeHtml(p.name) + (p.id === selfId ? ' (คุณ)' : '');
+      const name = escapeHtml(p.name) + (p.id === selfId ? ' (You)' : '');
       const secs = (p.finishTime / 1000).toFixed(1) + 's';
       slot.innerHTML = `
         <div class="podium-face" style="border-color:${p.color || '#8b8b90'}">${p.emoji || ''}</div>
@@ -758,9 +758,9 @@
     // 4th place onward plus anyone who didn't finish.
     standings.slice(podiumCount).forEach((p) => {
       const li = document.createElement('li');
-      const timeText = p.finished ? `${(p.finishTime / 1000).toFixed(1)}s` : 'ไม่จบการแข่งขัน';
+      const timeText = p.finished ? `${(p.finishTime / 1000).toFixed(1)}s` : 'Did not finish';
       const emojiPrefix = p.emoji ? `${p.emoji} ` : '';
-      li.innerHTML = `<strong>${emojiPrefix}${escapeHtml(p.name)}${p.id === selfId ? ' (คุณ)' : ''}</strong> — ${timeText}`;
+      li.innerHTML = `<strong>${emojiPrefix}${escapeHtml(p.name)}${p.id === selfId ? ' (You)' : ''}</strong> — ${timeText}`;
       list.appendChild(li);
     });
     const isHost = currentLobby && currentLobby.hostId === selfId;
@@ -928,10 +928,10 @@
     } else {
       if (!raceActive) {
         raceActive = true;
-        hudStatus.textContent = isSpectator ? '👁️ เริ่มแข่งแล้ว!' : 'ไปเลย!';
+        hudStatus.textContent = isSpectator ? '👁️ Race started!' : 'Go!';
         setTimeout(() => {
-          if (isSpectator) hudStatus.textContent = '👁️ กำลังชมการแข่งขัน';
-          else if (!selfFinished) hudStatus.textContent = 'กำลังวิ่ง...';
+          if (isSpectator) hudStatus.textContent = '👁️ Watching the race';
+          else if (!selfFinished) hudStatus.textContent = 'Racing...';
         }, 900);
       }
       countdownOverlay.classList.add('hidden');

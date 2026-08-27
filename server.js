@@ -319,20 +319,20 @@ io.on('connection', (socket) => {
   socket.on('joinLobby', ({ code, name, spectator, emoji } = {}, cb) => {
     const normalized = (code || '').toString().trim().toUpperCase();
     const lobby = lobbies.get(normalized);
-    if (!lobby) return cb && cb({ ok: false, error: 'ไม่พบห้องนี้ ตรวจสอบโค้ดอีกครั้ง' });
+    if (!lobby) return cb && cb({ ok: false, error: 'Room not found. Check the code and try again.' });
     const isSpectator = !!spectator;
     // Spectators can drop in any time (waiting/countdown/racing/results) since
     // they don't affect game balance; only actual racers need a fresh lobby.
     if (!isSpectator && lobby.state !== 'waiting') {
-      return cb && cb({ ok: false, error: 'ห้องนี้เริ่มแข่งไปแล้ว รอรอบถัดไป (เข้าชมแบบผู้ชมได้เลย)' });
+      return cb && cb({ ok: false, error: 'This room already started racing. Wait for the next round (or join as a spectator).' });
     }
     if (isSpectator) {
       const specCount = [...lobby.players.values()].filter((p) => p.connected && p.isSpectator).length;
-      if (specCount >= MAX_SPECTATORS_PER_LOBBY) return cb && cb({ ok: false, error: 'ผู้ชมเต็มแล้ว' });
+      if (specCount >= MAX_SPECTATORS_PER_LOBBY) return cb && cb({ ok: false, error: 'Spectator slots are full' });
     } else {
       const connectedCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
       if (connectedCount >= lobby.maxPlayers) {
-        return cb && cb({ ok: false, error: `ห้องเต็มแล้ว (สูงสุด ${lobby.maxPlayers} คน)` });
+        return cb && cb({ ok: false, error: `Room is full (max ${lobby.maxPlayers} players)` });
       }
     }
     const player = {
