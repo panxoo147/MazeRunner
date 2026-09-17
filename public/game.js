@@ -10,6 +10,25 @@
   // with ?debug=1 in the URL, never wired up for normal play.
   const DEBUG = new URLSearchParams(location.search).has('debug');
 
+  // ---------- cursor glow on the dotted background ----------
+  // Purely cosmetic — brightens the dots near the mouse; a harmless no-op
+  // on touch devices since mousemove never fires there. rAF-throttled so a
+  // storm of mousemove events collapses to at most one style write a frame.
+  const cursorGlow = document.getElementById('cursor-glow');
+  if (cursorGlow) {
+    let glowFrame = null;
+    window.addEventListener('mousemove', (e) => {
+      if (glowFrame) return;
+      glowFrame = requestAnimationFrame(() => {
+        cursorGlow.style.setProperty('--mx', `${e.clientX}px`);
+        cursorGlow.style.setProperty('--my', `${e.clientY}px`);
+        cursorGlow.classList.add('visible');
+        glowFrame = null;
+      });
+    });
+    window.addEventListener('mouseleave', () => cursorGlow.classList.remove('visible'));
+  }
+
   // ---------- generic screen helpers ----------
   const screens = {
     home: document.getElementById('screen-home'),

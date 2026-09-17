@@ -17,6 +17,11 @@
 </head>
 <body>
 
+  <!-- Faint glow that follows the mouse over the dotted background (see
+       #cursor-glow in style.css + the mousemove handler in game.js). Sits
+       first in the DOM so it paints behind every screen/panel. -->
+  <div id="cursor-glow" aria-hidden="true"></div>
+
   <!-- HOME -->
   <section id="screen-home" class="screen active">
     <div class="panel home-panel">
