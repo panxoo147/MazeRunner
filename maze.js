@@ -12,8 +12,24 @@ const WALL_THICKNESS = 6;
 // Power-up item types scattered through the maze — see server.js for how
 // each one is actually applied (server decides effects/targets; this file
 // only decides where items spawn).
-const ITEM_TYPES = ['turbo', 'confuse', 'reveal'];
+const ITEM_TYPES = ['turbo', 'confuse', 'reveal', 'slow', 'stun', 'wallbreak'];
 const ITEM_PICKUP_RADIUS = 20;
+
+// Weighted pool the server rolls from when a mystery box is collected (see
+// server.js's 'collectItem' handler) — a flat uniform roll across ITEM_TYPES
+// would hand out 'stun' (an AOE full-stop) and 'wallbreak' (a permanent,
+// whole-lobby shortcut) just as often as the mild self-buffs, which is too
+// strong. Common self-buffs (turbo/reveal) show up most, single-target
+// debuffs (confuse/slow) are uncommon, and the two most disruptive/permanent
+// effects (stun/wallbreak) are rare.
+const ITEM_POOL = [
+  'turbo', 'turbo', 'turbo',
+  'reveal', 'reveal', 'reveal',
+  'confuse', 'confuse',
+  'slow', 'slow',
+  'stun',
+  'wallbreak',
+];
 
 // Host-configurable "Map Size" room setting (see the create-room modal) —
 // a multiplier applied on top of the normal player-count-based sizing
@@ -247,6 +263,7 @@ module.exports = {
   CELL_SIZE,
   WALL_THICKNESS,
   ITEM_TYPES,
+  ITEM_POOL,
   ITEM_PICKUP_RADIUS,
   MIN_MAP_SIZE_MULTIPLIER,
   MAX_MAP_SIZE_MULTIPLIER,

@@ -18,7 +18,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const {
   generateMaze,
-  ITEM_TYPES,
+  ITEM_POOL,
   MIN_MAP_SIZE_MULTIPLIER,
   MAX_MAP_SIZE_MULTIPLIER,
   DEFAULT_MAP_SIZE_MULTIPLIER,
@@ -43,10 +43,15 @@ const LOBBY_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 // Power-up "game-changer" items — how long each effect lasts once used.
 // Effect semantics live client-side (movement is client-authoritative); the
 // server's job is just deciding pickup validity, holding at most 1 item per
-// player, and — for 'confuse' — picking who gets hit.
-const ITEM_EFFECT_MS = { turbo: 4000, reveal: 5000, confuse: 3000 };
+// player, and — for the targeted ones — picking who gets hit.
+// 'stun' is kept deliberately short: unlike the other debuffs it can hit
+// MULTIPLE players at once (see STUN_RADIUS) with a total movement freeze,
+// so a long duration would be far too punishing stacked with its AOE reach.
+const ITEM_EFFECT_MS = { turbo: 4000, reveal: 5000, confuse: 3000, slow: 3000, stun: 1200 };
 const ITEM_PICKUP_TOLERANCE = 20; // extra px slack on top of the pickup radius, for latency
 const ITEM_RESPAWN_MS = 10 * 1000; // a collected item reappears after this long, so long races don't run dry
+const STUN_RADIUS = 160; // px — roughly ~3.5 cells at CELL_SIZE=46, a tight "nearby" radius
+const WALLBREAK_SEARCH_RADIUS_CELLS = 1; // search the user's own cell + its immediate 8 neighbors
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -527,7 +532,7 @@ io.on('connection', (socket) => {
     // this spot — so grabbing the same pickup point again later can hand
     // out something different. Rolled server-side so a client can't peek at
     // or influence what it's about to get.
-    const awardedType = ITEM_TYPES[Math.floor(Math.random() * ITEM_TYPES.length)];
+    const awardedType = ITEM_POOL[Math.floor(Math.random() * ITEM_POOL.length)];
     player.heldItem = awardedType;
     // respawnInMs lets every client (not just the collector) draw a cooldown
     // ring on the ground where the item was, instead of it just vanishing.
@@ -547,10 +552,68 @@ io.on('connection', (socket) => {
     }, ITEM_RESPAWN_MS);
   });
 
-  // Use whatever power-up is currently held. 'turbo' and 'reveal' only
-  // affect the user themselves; 'confuse' is the comeback/attack item — it
-  // targets whichever *other* unfinished player is currently closest
-  // (straight-line) to the exit, i.e. a rough stand-in for "the leader".
+  // Find the single nearest breakable (non-boundary) wall segment to a
+  // player, searched within their current cell + its 8 immediate neighbors
+  // — deliberately small so a broken wall always appears right next to
+  // where the item was used. Boundary walls (the outer edge of the maze)
+  // are never candidates, so nobody can punch a hole out of the level.
+  // Mutates lobby.maze in place and broadcasts 'wallBroken' so every
+  // client's local collision grid + wall render + minimap stay in sync.
+  function breakNearestWall(lobby, player) {
+    if (player.x == null) return null;
+    const m = lobby.maze;
+    const cs = m.cellSize;
+    const cx = Math.max(0, Math.min(m.cols - 1, Math.floor(player.x / cs)));
+    const cy = Math.max(0, Math.min(m.rows - 1, Math.floor(player.y / cs)));
+
+    let best = null; // { kind, x, y, dist }
+    for (let gy = cy - WALLBREAK_SEARCH_RADIUS_CELLS; gy <= cy + WALLBREAK_SEARCH_RADIUS_CELLS; gy++) {
+      if (gy < 0 || gy >= m.rows) continue;
+      for (let gx = cx - WALLBREAK_SEARCH_RADIUS_CELLS; gx <= cx + WALLBREAK_SEARCH_RADIUS_CELLS; gx++) {
+        if (gx < 0 || gx >= m.cols) continue;
+        // horizontal walls above/below this cell (skip the outer boundary rows)
+        if (gy > 0 && m.hWalls[gy][gx]) {
+          const midY = gy * cs, midX = (gx + 0.5) * cs;
+          const dist = Math.hypot(player.x - midX, player.y - midY);
+          if (!best || dist < best.dist) best = { kind: 'h', x: gx, y: gy, dist };
+        }
+        if (gy + 1 < m.rows && m.hWalls[gy + 1][gx]) {
+          const midY = (gy + 1) * cs, midX = (gx + 0.5) * cs;
+          const dist = Math.hypot(player.x - midX, player.y - midY);
+          if (!best || dist < best.dist) best = { kind: 'h', x: gx, y: gy + 1, dist };
+        }
+        // vertical walls left/right of this cell (skip the outer boundary columns)
+        if (gx > 0 && m.vWalls[gy][gx]) {
+          const midX = gx * cs, midY = (gy + 0.5) * cs;
+          const dist = Math.hypot(player.x - midX, player.y - midY);
+          if (!best || dist < best.dist) best = { kind: 'v', x: gx, y: gy, dist };
+        }
+        if (gx + 1 < m.cols && m.vWalls[gy][gx + 1]) {
+          const midX = (gx + 1) * cs, midY = (gy + 0.5) * cs;
+          const dist = Math.hypot(player.x - midX, player.y - midY);
+          if (!best || dist < best.dist) best = { kind: 'v', x: gx + 1, y: gy, dist };
+        }
+      }
+    }
+    if (!best) return null;
+
+    if (best.kind === 'h') m.hWalls[best.y][best.x] = false;
+    else m.vWalls[best.y][best.x] = false;
+
+    io.to(lobby.code).emit('wallBroken', { kind: best.kind, x: best.x, y: best.y });
+    return best;
+  }
+
+  // Use whatever power-up is currently held.
+  // - 'turbo' / 'reveal': self-only buffs.
+  // - 'confuse' / 'slow': single-target debuffs — both target whichever
+  //   *other* unfinished player is currently closest (straight-line) to the
+  //   exit, i.e. a rough stand-in for "the leader" (the comeback mechanic).
+  // - 'stun': an AOE debuff — hits every OTHER unfinished player within
+  //   STUN_RADIUS of the user's own current position, since the ask was
+  //   specifically "stun people around you", not a single target.
+  // - 'wallbreak': no target — permanently opens the nearest wall next to
+  //   the user, a whole-lobby-affecting shortcut (see breakNearestWall).
   socket.on('useItem', () => {
     const lobby = getLobbyOfSocket(socket);
     if (!lobby || lobby.state !== 'racing') return;
@@ -565,22 +628,45 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // confuse
-    const m = lobby.maze;
-    let target = null;
-    let bestDist = Infinity;
-    for (const p of lobby.players.values()) {
-      if (p.id === player.id || p.finished || !p.connected || p.x == null) continue;
-      const dx = p.x - m.exitZone.x, dy = p.y - m.exitZone.y;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d < bestDist) { bestDist = d; target = p; }
+    if (type === 'confuse' || type === 'slow') {
+      const m = lobby.maze;
+      let target = null;
+      let bestDist = Infinity;
+      for (const p of lobby.players.values()) {
+        if (p.id === player.id || p.finished || !p.connected || p.x == null) continue;
+        const dx = p.x - m.exitZone.x, dy = p.y - m.exitZone.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < bestDist) { bestDist = d; target = p; }
+      }
+      if (target) {
+        io.to(target.id).emit('itemEffect', { type, duration: ITEM_EFFECT_MS[type], byName: player.name });
+        io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: target.name });
+      } else {
+        io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: null });
+      }
+      return;
     }
-    if (target) {
-      io.to(target.id).emit('itemEffect', { type: 'confuse', duration: ITEM_EFFECT_MS.confuse, byName: player.name });
-      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: target.name });
-    } else {
-      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, targetName: null });
+
+    if (type === 'stun') {
+      if (player.x == null) {
+        io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, hitCount: 0 });
+        return;
+      }
+      let hitCount = 0;
+      for (const p of lobby.players.values()) {
+        if (p.id === player.id || p.finished || !p.connected || p.x == null) continue;
+        const dx = p.x - player.x, dy = p.y - player.y;
+        if (Math.sqrt(dx * dx + dy * dy) > STUN_RADIUS) continue;
+        io.to(p.id).emit('itemEffect', { type: 'stun', duration: ITEM_EFFECT_MS.stun, byName: player.name });
+        hitCount++;
+      }
+      io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, hitCount });
+      return;
     }
+
+    // wallbreak
+    const broken = breakNearestWall(lobby, player);
+    io.to(lobby.code).emit('itemUsed', { byId: player.id, byName: player.name, type, broke: !!broken });
   });
 
   socket.on('leaveLobby', () => handleLeave(socket));

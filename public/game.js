@@ -78,6 +78,12 @@
     turbo: { icon: '⚡', label: 'Speed Boost', fx: 'fx-turbo', color: '0,210,168' },
     confuse: { icon: '🌀', label: 'Confuse Rival', fx: 'fx-confuse', color: '255,90,106' },
     reveal: { icon: '🧭', label: 'Compass', fx: 'fx-reveal', color: '255,209,102' },
+    slow: { icon: '🐢', label: 'Slow Trap', fx: 'fx-slow', color: '200,140,60' },
+    stun: { icon: '💫', label: 'Stun Blast', fx: 'fx-stun', color: '150,80,220' },
+    // Wall Breaker has no lingering screen effect (it's a one-shot, instant
+    // action) — its feedback is the toast in 'itemUsed' plus the wall
+    // visually vanishing via the 'wallBroken' handler, so it has no `fx`.
+    wallbreak: { icon: '🧨', label: 'Wall Breaker', fx: null, color: '255,140,60' },
   };
   // Pickups on the map are anonymous "mystery boxes" — the server rolls the
   // actual type at the moment of pickup (see 'itemCollected' below), so
@@ -86,7 +92,7 @@
   const itemsById = new Map(); // itemId -> {id,x,y,type,collected}
   const pendingCollect = new Set(); // itemIds we've asked the server about but haven't heard back on yet
   let heldItem = null; // type string or null
-  const activeEffects = { turbo: 0, reveal: 0, confuse: 0 }; // type -> timestamp (ms) the effect ends
+  const activeEffects = { turbo: 0, reveal: 0, confuse: 0, slow: 0, stun: 0 }; // type -> timestamp (ms) the effect ends
   let revealPath = null; // array of {x,y} pixel points from the moment 'reveal' activated
   let effectFxTimer = null;
 
@@ -491,9 +497,25 @@
     setHeldItem(null); // optimistic — server already validated we held one
   }
   btnUseItem.addEventListener('click', useHeldItem);
+  // Mobile bug: while the joystick finger is still down, tapping the item
+  // button with a second finger did nothing — you had to release the
+  // joystick first. Cause: most mobile browsers only synthesize a 'click'
+  // (the mouse-compatibility event) for a single touch per gesture, usually
+  // the FIRST finger still on the screen; a second finger that taps and
+  // lifts while the first is still held generally never gets its own
+  // synthetic click at all. 'touchend' has no such limitation — it fires
+  // per touch, independent of any other finger currently down — so drive
+  // the button from that directly instead of relying on 'click'.
+  // preventDefault() here also stops the (unreliable) follow-up click from
+  // double-firing on single-touch taps.
+  btnUseItem.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    useHeldItem();
+  }, { passive: false });
 
   function applyEffectVisual(fxClass, duration) {
-    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse');
+    if (!fxClass) return; // wallbreak (and any future instant-only item) has no screen effect
+    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse', 'fx-slow', 'fx-stun');
     // reflow so re-adding the same class restarts its CSS animation
     void screens.game.offsetWidth;
     screens.game.classList.add(fxClass);
@@ -699,9 +721,9 @@
     for (const it of maze.items) itemsById.set(it.id, { ...it, collected: false });
     pendingCollect.clear();
     setHeldItem(null);
-    activeEffects.turbo = activeEffects.reveal = activeEffects.confuse = 0;
+    activeEffects.turbo = activeEffects.reveal = activeEffects.confuse = activeEffects.slow = activeEffects.stun = 0;
     revealPath = null;
-    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse');
+    screens.game.classList.remove('fx-turbo', 'fx-reveal', 'fx-confuse', 'fx-slow', 'fx-stun');
     screens.game.classList.toggle('spectator-mode', isSpectator);
 
     for (const p of players) {
@@ -778,20 +800,56 @@
       showToast(`⚡ Speed Boost!`);
     } else if (type === 'confuse') {
       showToast(`🌀 ${byName || 'Someone'} confused you! Controls reversed`);
+    } else if (type === 'slow') {
+      showToast(`🐢 ${byName || 'Someone'} slowed you down!`);
+    } else if (type === 'stun') {
+      showToast(`💫 ${byName || 'Someone'} stunned you! Can't move`);
     }
   });
 
-  socket.on('itemUsed', ({ byId, byName, type, targetName }) => {
+  socket.on('itemUsed', ({ byId, byName, type, targetName, hitCount, broke }) => {
     const info = ITEM_INFO[type];
-    if (type === 'confuse') {
+    if (type === 'confuse' || type === 'slow') {
       // shown to everyone, including the attacker — the target gets their
       // own more specific toast from the 'itemEffect' handler above
-      showToast(targetName ? `${info.icon} ${byName} confused ${targetName}!` : `${info.icon} ${byName} used ${info.label} but had no target`);
+      const verb = type === 'slow' ? 'slowed' : 'confused';
+      showToast(targetName ? `${info.icon} ${byName} ${verb} ${targetName}!` : `${info.icon} ${byName} used ${info.label} but had no target`);
+    } else if (type === 'stun') {
+      // AOE — everyone hears about it, since it can hit several players at once
+      showToast(hitCount > 0
+        ? `${info.icon} ${byName} stunned ${hitCount} nearby player${hitCount === 1 ? '' : 's'}!`
+        : `${info.icon} ${byName} used ${info.label} but no one was nearby`);
+    } else if (type === 'wallbreak') {
+      showToast(broke ? `${info.icon} ${byName} smashed through a wall!` : `${info.icon} ${byName} used ${info.label} but found no wall nearby`);
     } else if (byId !== selfId) {
       // self already saw their own toast via 'itemEffect' — this is just
       // ambient flavor for everyone else watching
       showToast(`${info.icon} ${byName} used ${info.label}`);
     }
+  });
+
+  // A 'wallbreak' item permanently removes one wall segment for the whole
+  // lobby. The server already validated + mutated its own maze.hWalls /
+  // vWalls; this just replays the same single-cell edit locally so every
+  // client's collision grid, wall render (wallPath), and minimap cache all
+  // stay in sync without re-fetching the whole maze.
+  socket.on('wallBroken', ({ kind, x, y }) => {
+    if (!maze) return;
+    if (kind === 'h') {
+      if (!maze.hWalls[y] || !maze.hWalls[y][x]) return;
+      maze.hWalls[y][x] = false;
+    } else {
+      if (!maze.vWalls[y] || !maze.vWalls[y][x]) return;
+      maze.vWalls[y][x] = false;
+    }
+    const cs = maze.cellSize;
+    maze.wallSegments = maze.wallSegments.filter((s) => {
+      if (kind === 'h') return !(s.y1 === s.y2 && s.y1 === y * cs && s.x1 === x * cs && s.x2 === (x + 1) * cs);
+      return !(s.x1 === s.x2 && s.x1 === x * cs && s.y1 === y * cs && s.y2 === (y + 1) * cs);
+    });
+    wallPath = new Path2D();
+    for (const s of maze.wallSegments) { wallPath.moveTo(s.x1, s.y1); wallPath.lineTo(s.x2, s.y2); }
+    buildMinimapCache();
   });
 
   socket.on('playerFinished', ({ id, name, emoji, place, finishTime }) => {
@@ -1091,6 +1149,7 @@
   const MAX_SPEED = 235; // px/s
   const DEADZONE = 6;
   const MAX_REACH = 140;
+  const SLOW_SPEED_MULTIPLIER = 0.55; // 'slow' item — a hard, no-counterplay debuff, so kept a bit gentler than turbo's 1.6x buff is strong
 
   function clampCamera(pos, mazeSize, viewSize) {
     if (mazeSize <= viewSize) return (mazeSize - viewSize) / 2;
@@ -1150,9 +1209,14 @@
       const nowMs = Date.now();
       const confused = activeEffects.confuse > nowMs;
       const turbo = activeEffects.turbo > nowMs;
+      const slowed = activeEffects.slow > nowMs;
+      const stunned = activeEffects.stun > nowMs;
       let dirX = 0, dirY = 0, speedFactor = 0;
 
-      if (controlMode === 'wasd') {
+      if (stunned) {
+        // fully frozen — don't even read input this frame, same as "no keys
+        // held" / "joystick centered", so moveWithCollision below is a no-op
+      } else if (controlMode === 'wasd') {
         const ix = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
         const iy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
         if (ix !== 0 || iy !== 0) {
@@ -1177,7 +1241,7 @@
       }
 
       if (confused) { dirX = -dirX; dirY = -dirY; }
-      const speed = MAX_SPEED * (turbo ? 1.6 : 1);
+      const speed = MAX_SPEED * (turbo ? 1.6 : 1) * (slowed ? SLOW_SPEED_MULTIPLIER : 1);
       moveWithCollision(local, dirX * speed * speedFactor * dt, dirY * speed * speedFactor * dt, PLAYER_RADIUS);
 
       // item pickups — same client-detects-then-server-confirms pattern as
@@ -1467,6 +1531,9 @@
       getRaceStartAt: () => raceStartAt,
       getHeldItem: () => heldItem,
       getActiveEffects: () => ({ ...activeEffects }),
+      activeEffects, // direct mutable reference (like `local`) — lets tests force-trigger an effect without a real server round trip
+      setHeldItem, // lets tests simulate "holding an item" without a real pickup round trip
+      getJoystickActive: () => joystick.active,
       getItems: () => [...itemsById.values()],
       getIsSpectator: () => isSpectator,
       getOtherPlayers: () => [...otherPlayers.entries()].map(([id, o]) => ({ id, x: o.x, y: o.y, targetX: o.targetX, targetY: o.targetY })),
