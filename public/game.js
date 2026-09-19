@@ -111,6 +111,12 @@
   const savedName = sessionStorage.getItem('mazerace_name');
   if (savedName) inputName.value = savedName;
 
+  // A scanned lobby QR code opens the app at ?join=CODE — prefill the code
+  // field so the player only has to pick a name/emoji and press Join Room.
+  // Deliberately not auto-submitting: joining still needs a name.
+  const joinParam = new URLSearchParams(location.search).get('join');
+  if (joinParam) inputCode.value = joinParam.trim().toUpperCase();
+
   function getName() {
     const v = inputName.value.trim();
     if (v) sessionStorage.setItem('mazerace_name', v);
@@ -121,14 +127,41 @@
   // A per-player local preference — movement is fully client-authoritative,
   // so each player can pick whichever scheme they like independently.
   const isTouchDevice = window.matchMedia?.('(pointer: coarse)').matches || 'ontouchstart' in window;
+  // Racer camera zoom — 1 = no zoom. Phones render the maze a bit smaller
+  // so more of it fits on the (small, partly joystick-covered) screen.
+  const RACER_VIEW_SCALE = isTouchDevice ? 0.78 : 1;
+
+  // Best-effort native orientation lock — support for this is spotty (iOS
+  // Safari doesn't implement it at all, and most browsers require the page
+  // to be in fullscreen first), so this is a bonus on top of the real lock:
+  // the always-on CSS overlay in style.css (#rotate-lock-overlay) that
+  // covers the screen the moment a touch device is actually in landscape.
+  if (isTouchDevice && screen.orientation && typeof screen.orientation.lock === 'function') {
+    try { screen.orientation.lock('portrait').catch(() => {}); } catch (_) { /* not supported here — CSS overlay still covers it */ }
+  }
   const CONTROL_MODES = ['mouse', 'wasd', 'touch'];
-  let controlMode = sessionStorage.getItem('mazerace_control') || (isTouchDevice ? 'touch' : 'mouse');
-  if (!CONTROL_MODES.includes(controlMode)) controlMode = 'mouse';
+  // Mobile/touch devices are locked to the on-screen joystick — a mouse
+  // pointer or physical keyboard isn't a realistic input there, and letting
+  // players wander into "WASD" on a phone just leaves them stuck with no
+  // way to move. Any previously-saved preference is ignored on this device.
+  let controlMode = isTouchDevice ? 'touch' : (sessionStorage.getItem('mazerace_control') || 'mouse');
+  if (!CONTROL_MODES.includes(controlMode)) controlMode = isTouchDevice ? 'touch' : 'mouse';
   const controlToggle = document.getElementById('control-toggle');
   const hudControlBtn = document.getElementById('hud-control-toggle');
   const CONTROL_LABEL = { mouse: '🖱️ Mouse', wasd: '⌨️ WASD', touch: '📱 Joy' };
 
+  // The scheme picker (home screen) and the in-HUD cycle button only make
+  // sense when there's more than one viable scheme to pick from — hide both
+  // on touch devices instead of showing controls that would just break input.
+  if (isTouchDevice) {
+    controlToggle.style.display = 'none';
+    hudControlBtn.style.display = 'none';
+  }
+
   function setControlMode(mode) {
+    // Touch devices can't leave joystick mode, no matter what asked for it
+    // (HUD cycle button, "M" shortcut, a stray click) — see note above.
+    if (isTouchDevice) mode = 'touch';
     controlMode = CONTROL_MODES.includes(mode) ? mode : 'mouse';
     sessionStorage.setItem('mazerace_control', controlMode);
     controlToggle.querySelectorAll('.control-opt').forEach((btn) => {
@@ -202,10 +235,19 @@
   // modal so the host can set maxPlayers/finishLimit first, then confirms.
   const inputMaxPlayers = document.getElementById('input-max-players');
   const inputFinishLimit = document.getElementById('input-finish-limit');
+  const inputMapSize = document.getElementById('input-map-size');
+  const mapSizeValueEl = document.getElementById('map-size-value');
   const modalRoomSettings = document.getElementById('modal-room-settings');
   const modalError = document.getElementById('modal-error');
   const btnModalConfirm = document.getElementById('btn-modal-confirm');
   const btnModalCancel = document.getElementById('btn-modal-cancel');
+
+  // Live "1.0x" label next to the slider — parseFloat + toFixed(1) rather
+  // than echoing the raw string back, so e.g. a step landing on "1" reads
+  // as "1.0x" and stays consistent with every other value.
+  inputMapSize.addEventListener('input', () => {
+    mapSizeValueEl.textContent = `${parseFloat(inputMapSize.value).toFixed(1)}x`;
+  });
 
   function openRoomSettingsModal() {
     modalError.textContent = '';
@@ -226,6 +268,7 @@
     if (e.key !== 'Escape') return;
     if (!modalRoomSettings.classList.contains('hidden')) closeRoomSettingsModal();
     else if (!modalEmojiPicker.classList.contains('hidden')) closeEmojiModal();
+    else if (!modalQr.classList.contains('hidden')) closeQrModal();
   });
 
   btnModalConfirm.addEventListener('click', () => {
@@ -233,12 +276,14 @@
     homeError.textContent = '';
     const maxPlayers = parseInt(inputMaxPlayers.value, 10);
     const finishLimit = parseInt(inputFinishLimit.value, 10);
+    const mapSizeMultiplier = parseFloat(inputMapSize.value);
     socket.emit('createLobby', {
       name: getName(),
       spectator: inputSpectator.checked,
       emoji: selectedEmoji,
       maxPlayers,
       finishLimit,
+      mapSizeMultiplier,
     }, (res) => {
       if (!res.ok) { modalError.textContent = res.error || 'Failed to create room'; return; }
       closeRoomSettingsModal();
@@ -283,10 +328,53 @@
   const lobbyWaitMsg = document.getElementById('lobby-wait-msg');
   const btnToggleSpectator = document.getElementById('btn-toggle-spectator');
 
+  const lobbyQrEl = document.getElementById('lobby-qr');
+  const lobbyQrWrapEl = document.getElementById('lobby-qr-wrap');
+  const modalQr = document.getElementById('modal-qr');
+  const lobbyQrBigEl = document.getElementById('lobby-qr-big');
+  const lobbyQrBigCodeEl = document.getElementById('lobby-qr-big-code');
+  const btnQrModalClose = document.getElementById('btn-qr-modal-close');
+  let lastQrCode = null;
+  let lastQrSvg = null; // cached so the enlarge modal doesn't have to regenerate it
+
+  function renderLobbyQr(code) {
+    if (!lobbyQrEl || lastQrCode === code) return;
+    lastQrCode = code;
+    // Guard against the vendor script failing to load (offline/blocked) —
+    // the room code text is still there, scanning just isn't available.
+    if (typeof qrcode !== 'function') { lobbyQrWrapEl.style.display = 'none'; return; }
+    const joinUrl = `${location.origin}${location.pathname}?join=${encodeURIComponent(code)}`;
+    const qr = qrcode(0, 'M'); // typeNumber 0 = auto-size to fit the data
+    qr.addData(joinUrl);
+    qr.make();
+    lastQrSvg = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+    lobbyQrEl.innerHTML = lastQrSvg;
+  }
+
+  // Tapping/clicking the small QR opens the same code as a much bigger
+  // version in a modal — handy when someone across the room needs to scan
+  // it off a phone screen instead of leaning in close.
+  function openQrModal() {
+    if (!lastQrSvg) return;
+    lobbyQrBigEl.innerHTML = lastQrSvg;
+    lobbyQrBigCodeEl.textContent = lastQrCode || '';
+    modalQr.classList.remove('hidden');
+  }
+  function closeQrModal() { modalQr.classList.add('hidden'); }
+  lobbyQrEl.addEventListener('click', openQrModal);
+  lobbyQrEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openQrModal(); }
+  });
+  btnQrModalClose.addEventListener('click', closeQrModal);
+  modalQr.addEventListener('click', (e) => {
+    if (e.target === modalQr) closeQrModal();
+  });
+
   function applyLobby(lobby) {
     currentLobby = lobby;
     lobbyCodeEl.textContent = lobby.code;
     lobbyMaxEl.textContent = lobby.maxPlayers;
+    renderLobbyQr(lobby.code);
     renderPlayerList(lobby);
   }
 
@@ -343,8 +431,26 @@
   // ---------- GAME screen ----------
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
+
+  // Same dotted-grid look as the html/body background on every other screen
+  // (see the "html, body" dot pattern in style.css) — without this the game
+  // screen's canvas paints a flat, textureless fill over everything and
+  // completely hides that background, since it's fully opaque and covers
+  // the whole viewport. Built once as a tiny repeating tile/pattern (not
+  // redrawn every frame) so it's as cheap as a solid fillRect.
+  const dotTile = document.createElement('canvas');
+  dotTile.width = 24;
+  dotTile.height = 24;
+  const dotTileCtx = dotTile.getContext('2d');
+  dotTileCtx.fillStyle = 'rgba(255,255,255,0.07)';
+  dotTileCtx.beginPath();
+  dotTileCtx.arc(12, 12, 1, 0, Math.PI * 2);
+  dotTileCtx.fill();
+  const dotPattern = ctx.createPattern(dotTile, 'repeat');
   const miniCanvas = document.getElementById('minimap-canvas');
   const miniCtx = miniCanvas.getContext('2d');
+  const hudCompass = document.getElementById('hud-compass');
+  const hudCompassArrow = document.getElementById('hud-compass-arrow');
   const countdownOverlay = document.getElementById('countdown-overlay');
   const countdownNumber = document.getElementById('countdown-number');
   const hudTimer = document.getElementById('hud-timer');
@@ -767,21 +873,32 @@
   function showResults(standings, reason) {
     const reasonEl = document.getElementById('results-reason');
     reasonEl.textContent = raceEndReasonText(reason);
-    const podiumCount = renderPodium(standings) || 0;
+    // Results only ever show racers who actually crossed the finish line —
+    // standings also carries everyone still stuck in the maze (sorted after
+    // the finishers), but listing "Did not finish" for them just cluttered
+    // the results screen with people who didn't really place.
+    const finishers = standings.filter((p) => p.finished);
+    const podiumCount = renderPodium(finishers) || 0;
     const list = document.getElementById('results-list');
     list.innerHTML = '';
-    // The <ol> numbers automatically — start it after the podium slots so a
-    // 4th-place entry reads "4." instead of restarting at "1."
-    list.setAttribute('start', String(podiumCount + 1));
-    // Skip whoever already got a podium slot — the remaining list covers
-    // 4th place onward plus anyone who didn't finish.
-    standings.slice(podiumCount).forEach((p) => {
-      const li = document.createElement('li');
-      const timeText = p.finished ? `${(p.finishTime / 1000).toFixed(1)}s` : 'Did not finish';
-      const emojiPrefix = p.emoji ? `${p.emoji} ` : '';
-      li.innerHTML = `<strong>${emojiPrefix}${escapeHtml(p.name)}${p.id === selfId ? ' (You)' : ''}</strong> — ${timeText}`;
-      list.appendChild(li);
-    });
+    if (finishers.length === 0) {
+      list.style.display = 'none';
+      reasonEl.textContent += (reasonEl.textContent ? ' — ' : '') + 'No one crossed the finish line.';
+    } else {
+      list.style.display = '';
+      // The <ol> numbers automatically — start it after the podium slots so
+      // a 4th-place entry reads "4." instead of restarting at "1."
+      list.setAttribute('start', String(podiumCount + 1));
+      // Skip whoever already got a podium slot — the remaining list is 4th
+      // place onward, all of them finishers.
+      finishers.slice(podiumCount).forEach((p) => {
+        const li = document.createElement('li');
+        const timeText = `${(p.finishTime / 1000).toFixed(1)}s`;
+        const emojiPrefix = p.emoji ? `${p.emoji} ` : '';
+        li.innerHTML = `<strong>${emojiPrefix}${escapeHtml(p.name)}${p.id === selfId ? ' (You)' : ''}</strong> — ${timeText}`;
+        list.appendChild(li);
+      });
+    }
     const isHost = currentLobby && currentLobby.hostId === selfId;
     document.getElementById('btn-play-again').style.display = isHost ? 'block' : 'none';
     document.getElementById('btn-back-to-lobby').style.display = isHost ? 'block' : 'none';
@@ -919,6 +1036,55 @@
     }
   }
 
+  // Mobile-only "which way is the exit" arrow — stands in for the minimap,
+  // which is hidden at mobile screen sizes. Spectators already see the
+  // whole maze at once (zoomed-out camera), so it's racer-only.
+  function updateCompass(camX, camY, viewScale) {
+    const show = isTouchDevice && !!maze && !isSpectator;
+    if (!show) { hudCompass.classList.add('hidden'); return; }
+
+    // Screen-space vector from viewport center to the exit. The camera
+    // follows the player (racers render at/near screen center), so this
+    // doubles as "which direction, and how far off-screen, is the exit".
+    const exScreenX = (maze.exitZone.x - camX) * viewScale;
+    const exScreenY = (maze.exitZone.y - camY) * viewScale;
+    const centerX = cssW / 2, centerY = cssH / 2;
+    const dx = exScreenX - centerX;
+    const dy = exScreenY - centerY;
+
+    // How far in from each viewport edge the arrow is allowed to roam —
+    // keeps it clear of the screen border. Once the exit itself already
+    // falls inside this same inset rectangle it's visibly on-screen (you
+    // can see the real EXIT marker), so there's nothing left to point at.
+    const marginX = 46, marginY = 46;
+    const halfW = Math.max(1, cssW / 2 - marginX);
+    const halfH = Math.max(1, cssH / 2 - marginY);
+    if (Math.abs(dx) <= halfW && Math.abs(dy) <= halfH) {
+      hudCompass.classList.add('hidden');
+      return;
+    }
+    hudCompass.classList.remove('hidden');
+
+    // Project the center->exit ray out to whichever edge of that inset
+    // rectangle it crosses first — this is what makes the arrow slide all
+    // the way around the border instead of sitting in one fixed corner.
+    const scaleX = dx !== 0 ? halfW / Math.abs(dx) : Infinity;
+    const scaleY = dy !== 0 ? halfH / Math.abs(dy) : Infinity;
+    const scale = Math.min(scaleX, scaleY);
+    const edgeX = centerX + dx * scale;
+    const edgeY = centerY + dy * scale;
+
+    const size = 44; // matches .hud-compass width/height in style.css
+    hudCompass.style.left = `${edgeX - size / 2}px`;
+    hudCompass.style.top = `${edgeY - size / 2}px`;
+
+    // atan2 measures from the positive x-axis, clockwise (screen y grows
+    // downward) — the arrow glyph rests pointing straight up (its own
+    // "0 degrees"), so +90deg lines the two conventions up.
+    const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+    hudCompassArrow.style.transform = `rotate(${angleDeg}deg)`;
+  }
+
   // ---------- main loop ----------
   let lastTime = performance.now();
   let lastSendTime = 0;
@@ -968,8 +1134,14 @@
         offsetX = (cssW - maze.width * viewScale) / 2;
         offsetY = (cssH - maze.height * viewScale) / 2;
       } else {
-        camX = clampCamera(local.x - cssW / 2, maze.width, cssW);
-        camY = clampCamera(local.y - cssH / 2, maze.height, cssH);
+        // Phones/tablets get a wider view — the screen is small and a
+        // finger/joystick covers part of it, so 1:1 zoom shows too little
+        // of the maze to plan a route. RACER_VIEW_SCALE < 1 shrinks the
+        // world on screen, which widens how much of it is visible.
+        viewScale = RACER_VIEW_SCALE;
+        const viewW = cssW / viewScale, viewH = cssH / viewScale;
+        camX = clampCamera(local.x - viewW / 2, maze.width, viewW);
+        camY = clampCamera(local.y - viewH / 2, maze.height, viewH);
       }
     }
 
@@ -1060,6 +1232,7 @@
 
     render(camX, camY, offsetX, offsetY, viewScale);
     drawMinimap();
+    updateCompass(camX, camY, viewScale);
     requestAnimationFrame(loop);
   }
 
@@ -1080,31 +1253,64 @@
     // same theme instead of a separate near-black canvas.
     ctx.fillStyle = '#121214';
     ctx.fillRect(0, 0, cssW, cssH);
+    ctx.fillStyle = dotPattern;
+    ctx.fillRect(0, 0, cssW, cssH);
 
     ctx.save();
     ctx.translate(offsetX, offsetY);
     ctx.scale(viewScale, viewScale);
     ctx.translate(-camX, -camY);
 
-    // floor
+    // floor — dotted the same way, tiled in maze/world space (via the
+    // translate/scale already applied above) so the texture pans with the
+    // camera like a real part of the floor instead of sliding underneath it.
     ctx.fillStyle = '#232326';
     ctx.fillRect(0, 0, maze.width, maze.height);
+    ctx.fillStyle = dotPattern;
+    ctx.fillRect(0, 0, maze.width, maze.height);
+
+    const nowMs = Date.now(); // shared clock for this frame's pulse/bob animations
 
     // spawn / exit zones
     drawZone(maze.spawn, 'rgba(0,210,168,0.15)', 'rgba(0,210,168,0.5)');
     drawZone(maze.exitZone, 'rgba(255,209,102,0.18)', 'rgba(255,209,102,0.75)');
+    // pulsing "portal" ring around the exit — a slow breathing glow so the
+    // goal reads as something alive/interactive instead of a flat circle
+    {
+      const pulse = 0.5 + 0.5 * Math.sin(nowMs / 500);
+      ctx.beginPath();
+      ctx.arc(maze.exitZone.x, maze.exitZone.y, maze.exitZone.radius + 4 + pulse * 3, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,209,102,${0.25 + pulse * 0.25})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
     ctx.fillStyle = '#ffd166';
-    ctx.font = 'bold 13px sans-serif';
+    ctx.font = 'bold 13px "Pixelify Sans", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('EXIT', maze.exitZone.x, maze.exitZone.y - maze.exitZone.radius - 10);
 
-    // walls — softened light gray instead of near-white; staring at a bright
+    // walls — three-pass bevel (drop shadow, body, top-edge highlight) with
+    // square caps/miter joins so corridors read as solid chunky blocks
+    // instead of thin flat lines, giving the maze some depth/game feel.
+    // Softened light gray body instead of near-white; staring at a bright
     // white maze for a whole race was straining on the eyes.
+    ctx.lineCap = 'square';
+    ctx.lineJoin = 'miter';
+    ctx.save();
+    ctx.translate(0, 2);
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = maze.wallThickness + 2;
+    ctx.stroke(wallPath);
+    ctx.restore();
     ctx.strokeStyle = '#c7c7cc';
     ctx.lineWidth = maze.wallThickness;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
     ctx.stroke(wallPath);
+    ctx.save();
+    ctx.translate(0, -1);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = Math.max(1, maze.wallThickness * 0.35);
+    ctx.stroke(wallPath);
+    ctx.restore();
 
     // reveal-path overlay (while the 'reveal' item effect is active)
     if (revealPath && activeEffects.reveal > Date.now() && revealPath.length > 1) {
@@ -1121,7 +1327,6 @@
     }
 
     // item pickups
-    const nowMs = Date.now();
     for (const item of itemsById.values()) {
       const info = MYSTERY_ITEM;
       if (item.collected) {
@@ -1145,29 +1350,53 @@
         ctx.lineWidth = 3;
         ctx.stroke();
         ctx.fillStyle = 'rgba(255,255,255,0.65)';
-        ctx.font = '10px sans-serif';
+        ctx.font = '10px "Pixelify Sans", sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(`${Math.ceil(remaining / 1000)}s`, item.x, item.y + 3);
         continue;
       }
-      // rich, saturated per-type color (+ a soft glow) so pickups read clearly
-      // against the dark maze instead of the old plain washed-out white ring
+      // A per-item phase (from its fixed x/y, so it's stable across frames
+      // with no extra state to track) staggers the bob/pulse/spin so a
+      // field of pickups feels alive instead of every one animating in
+      // lockstep — small game-juice touch rather than a static flat badge.
+      const phase = (item.x * 7 + item.y * 13) % 1000;
+      const bob = Math.sin((nowMs + phase) / 260) * 2;
+      const pulse = 0.75 + 0.25 * Math.sin((nowMs + phase) / 340);
+      const cx = item.x;
+      const cy = item.y + bob;
+
+      // slow-spinning dashed ring — reads as an "active power-up" the way
+      // arcade pickups usually signal they can be grabbed
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate((nowMs / 900) % (Math.PI * 2));
+      ctx.beginPath();
+      ctx.setLineDash([3, 4]);
+      ctx.arc(0, 0, 19, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${info.color},0.55)`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+
+      // rich, saturated per-type color (+ a soft glow that breathes with the
+      // pulse) so pickups read clearly against the dark maze instead of the
+      // old plain washed-out white ring
       ctx.save();
       ctx.shadowColor = `rgba(${info.color},0.9)`;
-      ctx.shadowBlur = 12;
+      ctx.shadowBlur = 10 + pulse * 8;
       ctx.beginPath();
-      ctx.arc(item.x, item.y, 15, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${info.color},0.32)`;
+      ctx.arc(cx, cy, 15, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${info.color},${0.28 + pulse * 0.1})`;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.strokeStyle = `rgba(${info.color},0.95)`;
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.restore();
-      ctx.font = '18px sans-serif';
+      ctx.font = '20px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(info.icon, item.x, item.y + 1);
+      ctx.fillText(info.icon, cx, cy + 1);
       ctx.textBaseline = 'alphabetic';
     }
 
@@ -1242,6 +1471,8 @@
       getIsSpectator: () => isSpectator,
       getOtherPlayers: () => [...otherPlayers.entries()].map(([id, o]) => ({ id, x: o.x, y: o.y, targetX: o.targetX, targetY: o.targetY })),
       getRaceStartSignalReceived: () => raceStartSignalReceived,
+      getRacerViewScale: () => RACER_VIEW_SCALE,
+      showResults,
       useHeldItem,
     };
   }

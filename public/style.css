@@ -24,6 +24,27 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* Modern, minimal scrollbars everywhere something can scroll (the screen
+   itself, panels, the player list, leaderboard, results list, emoji picker)
+   instead of the browser's bulky default. Applying it to `*` is harmless —
+   these rules only render on an element that actually has a scrollbar, so
+   nothing needs to be kept in sync with a separate list of "scrollable"
+   selectors as new ones get added. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.22) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(255,255,255,0.22);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.4); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
 /* Buttons/inputs/selects don't inherit the page font by default (browsers
    give them a platform UI font instead) — without this reset every button
    in the app would silently fall back to plain system Arial no matter what
@@ -161,6 +182,55 @@ input, textarea { user-select: text; -webkit-user-select: text; }
   outline: none;
 }
 .field input:focus { border-color: var(--accent); }
+
+.field-label-row { display: flex; justify-content: space-between; align-items: baseline; }
+.field .field-value { color: var(--accent-2); font-weight: 600; font-family: var(--font-display); }
+.field-hint { display: block; font-size: 10px; color: var(--text-dim); opacity: 0.85; margin-top: 2px; }
+
+/* Range slider (Map Size) — the default text-input look in `.field input`
+   above (padding/background/border-radius) is built for text boxes, so a
+   native <input type="range"> gets its own reset + a themed track/thumb
+   instead of inheriting that box styling. */
+.field input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  height: 24px;
+  letter-spacing: normal;
+}
+.field input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-alt);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.field input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+}
+.field input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-alt);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.field input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+}
+.field input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .name-avatar-row { display: flex; gap: 8px; align-items: stretch; }
 .name-avatar-row input { flex: 1; min-width: 0; }
@@ -316,17 +386,87 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 
 /* LOBBY */
 .lobby-panel { width: min(440px, 92vw); max-height: 88vh; display: flex; flex-direction: column; }
-.lobby-header { display: flex; justify-content: space-between; align-items: center; }
+/* Every lobby section except the player list keeps its natural size no
+   matter how tight the panel gets — flex-shrink:0 stops them from being
+   squeezed. The player list is the one part that's meant to flex/scroll
+   (see .player-list below); if it still doesn't fit, the whole .panel
+   scrolls instead (it has overflow-y:auto), which reads far better than
+   every section getting proportionally squished. */
+.lobby-header { display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
 .lobby-code-label { font-size: 11px; color: var(--text-dim); }
 .lobby-code { font-size: 28px; font-weight: 700; letter-spacing: 4px; color: var(--accent-2); font-family: var(--font-display); }
-.lobby-sub { color: var(--text-dim); font-size: 12px; margin: 8px 0 12px; }
+.lobby-sub { color: var(--text-dim); font-size: 12px; margin: 8px 0 12px; flex-shrink: 0; }
 .spectator-count { margin-left: 6px; }
+
+.lobby-qr-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0;
+  flex-shrink: 0;
+}
+.lobby-qr {
+  /* QR codes need real contrast to scan reliably with a phone camera, so
+     this stays a light card regardless of the app's dark theme. */
+  width: 128px;
+  height: 128px;
+  background: #f2f2f4;
+  border-radius: 10px;
+  padding: 8px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.lobby-qr:hover, .lobby-qr:focus-visible {
+  transform: scale(1.04);
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.18);
+  outline: none;
+}
+.lobby-qr svg { width: 100%; height: 100%; display: block; }
+.lobby-qr-caption { font-size: 11px; color: var(--text-dim); letter-spacing: 0.5px; }
+
+/* Enlarged QR modal — a plain, bigger version of the same code for someone
+   scanning it from across the room off a phone/monitor. */
+.modal-panel-qr { text-align: center; }
+.lobby-qr-big {
+  width: min(280px, 70vw);
+  height: min(280px, 70vw);
+  margin: 0 auto;
+  cursor: default;
+}
+.lobby-qr-big:hover { transform: none; box-shadow: none; }
+#lobby-qr-big-code {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  letter-spacing: 3px;
+  color: var(--accent-2);
+  font-family: var(--font-display);
+  font-weight: 700;
+}
 
 .player-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  /* Capped at 160px (not 1fr) and left-aligned via justify-content — with
+     1fr, a lobby with just 1-2 players stretched that single chip across
+     the entire panel width, which looked like a layout bug. Now chips stay
+     a sane, consistent size and just leave empty space instead of stretching
+     to fill the row, no matter how few players are in yet. */
+  grid-template-columns: repeat(auto-fill, minmax(110px, 160px));
+  justify-content: start;
   gap: 7px;
   overflow-y: auto;
+  /* flex-basis 0 + grow lets this take whatever room is left after the
+     header/QR/footer claim theirs; min-height keeps at least ~1.5 rows
+     visible instead of collapsing to a sliver (a scrollable flex child
+     with overflow:auto has an automatic minimum size of 0 by spec, so
+     without an explicit min-height it's the first thing flexbox crushes
+     when the panel runs out of vertical space). */
+  flex: 1 1 0;
+  min-height: 96px;
   max-height: 40vh;
   padding: 4px 2px;
   margin-bottom: 12px;
@@ -349,7 +489,7 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 .player-chip.is-spectator { opacity: 0.7; }
 .player-chip .spectator-badge { font-size: 11px; margin-left: auto; }
 
-.lobby-footer { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.lobby-footer { display: flex; flex-direction: column; gap: 8px; align-items: stretch; flex-shrink: 0; }
 .wait-msg { text-align: center; color: var(--text-dim); font-size: 12px; margin: 4px 0; }
 
 /* GAME */
@@ -401,6 +541,39 @@ input, textarea { user-select: text; -webkit-user-select: text; }
   border-radius: 10px;
   max-width: 34vw;
   max-height: 30vh;
+}
+
+/* Mobile exit compass — a radar-style edge indicator, not a fixed corner
+   badge: game.js positions it every frame by projecting a ray from screen
+   center toward the exit out to the edge of the viewport (inset by a
+   margin), so it slides all the way around the border depending on which
+   direction the exit actually is. left/top are set from JS (in px, via
+   style.left/top below — this element must stay position:absolute with no
+   inset shorthand here or those would fight the JS-set position); this
+   block only supplies the fixed look/size. "hidden" is the default so it
+   never flashes on desktop before that JS runs, and game.js also hides it
+   whenever the exit is already visible on-screen (no need to point at
+   something you can already see). */
+.hud-compass {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(28,28,31,0.88);
+  border: 1px solid rgba(255,255,255,0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  will-change: left, top, transform;
+}
+.hud-compass.hidden { display: none; }
+.hud-compass-arrow {
+  font-size: 24px;
+  line-height: 1;
+  color: #ffd166; /* same gold as the exit zone, so the link between "this arrow" and "the exit" reads at a glance */
+  transform-origin: center;
+  filter: drop-shadow(0 0 3px rgba(255,209,102,0.5));
 }
 
 /* power-up item HUD */
@@ -481,26 +654,38 @@ input, textarea { user-select: text; -webkit-user-select: text; }
   border: 2px solid rgba(255,255,255,0.5);
 }
 
-.orientation-hint {
+/* Portrait-only lock — Maze Race is designed for portrait on touch devices,
+   so a phone rotated to landscape gets a full-screen "please rotate back"
+   overlay instead of the game (see #rotate-lock-overlay in index.html).
+   `pointer: coarse` keeps this from ever firing on a desktop browser window
+   that just happens to be wider than it is tall — only real touch devices
+   get locked, and only while actually rotated to landscape. z-index is
+   higher than any modal (see .modal-overlay) so it truly blocks everything
+   underneath, not just the current screen. */
+.rotate-lock-overlay {
   display: none;
-  position: absolute;
-  top: calc(env(safe-area-inset-top) + 100px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(35,35,38,0.9);
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 10px;
-  padding: 7px 12px;
-  font-size: 11px;
-  max-width: 70vw;
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(6,6,7,0.97);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
   text-align: center;
-  pointer-events: none;
-  z-index: 3;
-  animation: fadeOutHint 5s ease forwards;
+  padding: 24px;
 }
-@keyframes fadeOutHint { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
-@media (max-width: 700px) and (orientation: portrait) {
-  .orientation-hint { display: block; }
+.rotate-lock-icon {
+  font-size: 48px;
+  animation: rotate-lock-spin 1.8s ease-in-out infinite;
+}
+.rotate-lock-text { font-size: 15px; color: var(--text-dim); max-width: 280px; }
+@keyframes rotate-lock-spin {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-90deg); }
+}
+@media (orientation: landscape) and (pointer: coarse) {
+  .rotate-lock-overlay { display: flex; }
 }
 
 .countdown-overlay {
@@ -584,16 +769,35 @@ input, textarea { user-select: text; -webkit-user-select: text; }
   .home-panel h1 { font-size: 22px; }
   .subtitle { font-size: 11.5px; margin-bottom: 14px; }
   .lobby-code { font-size: 24px; letter-spacing: 3px; }
-  .player-list { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); max-height: 32vh; }
+  .player-list { grid-template-columns: repeat(auto-fill, minmax(90px, 140px)); max-height: 32vh; }
   .control-opt { font-size: 11px; padding: 7px 5px; }
+  /* A smaller QR frees up vertical room for the player list on narrow
+     phones — it's still plenty big enough for a phone camera to scan. */
+  .lobby-qr-wrap { margin: 10px 0; }
+  .lobby-qr { width: 96px; height: 96px; }
+}
+
+/* Short viewports (landscape phones, small windows) run out of vertical
+   room fast — shrink/tighten the lobby panel's fixed-size sections so the
+   player list (the one part that's supposed to flex) keeps a usable amount
+   of space instead of getting crushed down to a sliver. */
+@media (max-height: 700px) {
+  .lobby-qr-wrap { margin: 8px 0; gap: 3px; }
+  .lobby-qr { width: 84px; height: 84px; padding: 6px; }
+  .lobby-qr-caption { font-size: 10px; }
+  .lobby-sub { margin: 6px 0 8px; }
+}
+@media (max-height: 480px) {
+  .lobby-qr-wrap { display: none; } /* landscape phones: prioritize the player list over the QR */
 }
 
 /* Game-screen HUD (timer, leaderboard, minimap, item panel) was sized in
-   vw/vh assuming a roomy desktop viewport — on a phone, especially in the
-   landscape orientation the game recommends, that ate a large chunk of the
-   actual play area. This tightens all of it down together. Landscape phones
-   are wide (so the max-width:480px query below never fires) but short, so
-   this is keyed off height, not width. */
+   vw/vh assuming a roomy desktop viewport — on any short window that ate a
+   large chunk of the actual play area. This tightens all of it down
+   together. Phones can't actually reach this in landscape any more (the
+   portrait-only rotate-lock above blocks that), so in practice this now
+   mainly covers a short *desktop* browser window; keyed off height, not
+   width, so it still applies regardless of how wide that window is. */
 @media (max-height: 480px) {
   .hud { padding: 6px 9px; max-width: 40vw; }
   .hud-timer { font-size: 15px; }

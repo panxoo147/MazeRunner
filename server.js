@@ -16,7 +16,13 @@ const path = require('path');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const { generateMaze, ITEM_TYPES } = require('./maze');
+const {
+  generateMaze,
+  ITEM_TYPES,
+  MIN_MAP_SIZE_MULTIPLIER,
+  MAX_MAP_SIZE_MULTIPLIER,
+  DEFAULT_MAP_SIZE_MULTIPLIER,
+} = require('./maze');
 
 const PORT = process.env.PORT || 3000;
 // Max players / finish-limit are now host-configurable per lobby (set at
@@ -122,6 +128,17 @@ function sanitizeFinishLimit(raw, maxPlayers) {
   return Math.min(upperBound, Math.max(MIN_FINISH_LIMIT, n));
 }
 
+// "Map Size" — a multiplier on top of the normal player-count-based maze
+// sizing (see sizeForPlayers in maze.js). Unlike maxPlayers/finishLimit
+// this isn't an integer count, so it's rounded to 1 decimal place rather
+// than a whole number.
+function sanitizeMapSizeMultiplier(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_MAP_SIZE_MULTIPLIER;
+  const clamped = Math.min(MAX_MAP_SIZE_MULTIPLIER, Math.max(MIN_MAP_SIZE_MULTIPLIER, n));
+  return Math.round(clamped * 10) / 10;
+}
+
 function publicPlayer(p) {
   return {
     id: p.id,
@@ -158,6 +175,7 @@ function lobbySnapshot(lobby) {
     hostId: lobby.hostId,
     maxPlayers: lobby.maxPlayers,
     finishLimit: lobby.finishLimit,
+    mapSizeMultiplier: lobby.mapSizeMultiplier,
     players: [...lobby.players.values()].map(publicPlayer),
     raceStartAt: lobby.raceStartAt,
   };
@@ -219,7 +237,7 @@ function startTicking(lobby) {
 function startRace(lobby) {
   const playerCount = [...lobby.players.values()].filter((p) => p.connected && !p.isSpectator).length;
   const seed = Math.floor(Math.random() * 2 ** 31);
-  lobby.maze = generateMaze({ seed, playerCount });
+  lobby.maze = generateMaze({ seed, playerCount, mapSizeMultiplier: lobby.mapSizeMultiplier });
   lobby.state = 'countdown';
   lobby.raceStartAt = Date.now() + COUNTDOWN_MS;
   lobby.itemsById = new Map(lobby.maze.items.map((it) => [it.id, { ...it, collected: false }]));
@@ -275,7 +293,7 @@ function startRace(lobby) {
 io.on('connection', (socket) => {
   socket.data.lobbyCode = null;
 
-  socket.on('createLobby', ({ name, spectator, emoji, maxPlayers, finishLimit } = {}, cb) => {
+  socket.on('createLobby', ({ name, spectator, emoji, maxPlayers, finishLimit, mapSizeMultiplier } = {}, cb) => {
     const code = createLobbyCode();
     const isSpectator = !!spectator;
     const player = {
@@ -295,6 +313,7 @@ io.on('connection', (socket) => {
     };
     const cleanMaxPlayers = sanitizeMaxPlayers(maxPlayers);
     const cleanFinishLimit = sanitizeFinishLimit(finishLimit, cleanMaxPlayers);
+    const cleanMapSizeMultiplier = sanitizeMapSizeMultiplier(mapSizeMultiplier);
     const lobby = {
       code,
       hostId: socket.id,
@@ -309,6 +328,7 @@ io.on('connection', (socket) => {
       colorSeq: isSpectator ? 0 : 1, // next colorForIndex() slot to hand out
       maxPlayers: cleanMaxPlayers,
       finishLimit: cleanFinishLimit,
+      mapSizeMultiplier: cleanMapSizeMultiplier,
     };
     lobbies.set(code, lobby);
     socket.join(code);

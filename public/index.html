@@ -22,6 +22,17 @@
        first in the DOM so it paints behind every screen/panel. -->
   <div id="cursor-glow" aria-hidden="true"></div>
 
+  <!-- Portrait-only lock for touch devices — shown/hidden purely by a CSS
+       media query (orientation: landscape) and (pointer: coarse), so it
+       reacts to a real device rotation with no JS needed, sits above every
+       screen/modal (see .rotate-lock-overlay in style.css), and blocks
+       interaction with whatever's underneath until the phone is rotated
+       back. Not shown on desktop, where a landscape *window* is normal. -->
+  <div id="rotate-lock-overlay" class="rotate-lock-overlay" aria-hidden="true">
+    <div class="rotate-lock-icon">🔄</div>
+    <div class="rotate-lock-text">Maze Race is portrait-only — please rotate your phone back.</div>
+  </div>
+
   <!-- HOME -->
   <section id="screen-home" class="screen active">
     <div class="panel home-panel">
@@ -84,6 +95,11 @@
         <button id="btn-copy-code" class="btn btn-small">Copy</button>
       </div>
 
+      <div class="lobby-qr-wrap" id="lobby-qr-wrap">
+        <div class="lobby-qr" id="lobby-qr" role="button" tabindex="0" title="Tap to enlarge"></div>
+        <div class="lobby-qr-caption">Scan to join · tap to enlarge</div>
+      </div>
+
       <div class="lobby-sub">
         <span id="lobby-count">0</span> / <span id="lobby-max">50</span> Players
         <span id="lobby-spectator-count" class="spectator-count"></span>
@@ -121,11 +137,17 @@
 
     <canvas id="minimap-canvas" class="minimap"></canvas>
 
+    <!-- Mobile-only compass — the minimap is hidden on small screens (see
+         the responsive rules in style.css), so touch devices get this
+         instead: a small arrow in the corner that always points toward the
+         exit, updated every frame in game.js. -->
+    <div id="hud-compass" class="hud-compass hidden" title="Points toward the exit">
+      <div id="hud-compass-arrow" class="hud-compass-arrow">⬆</div>
+    </div>
+
     <div id="joystick-base" class="joystick-base hidden">
       <div id="joystick-knob" class="joystick-knob"></div>
     </div>
-
-    <div id="orientation-hint" class="orientation-hint">🔄 Rotate to landscape for easier play</div>
 
     <div id="item-toast" class="item-toast"></div>
 
@@ -177,6 +199,11 @@
         <span>Finishers needed to end the race</span>
         <input id="input-finish-limit" type="number" min="1" max="100" value="4" inputmode="numeric" />
       </label>
+      <label class="field">
+        <span class="field-label-row"><span>Map Size</span><span id="map-size-value" class="field-value">1.0x</span></span>
+        <input id="input-map-size" type="range" min="0.5" max="2" step="0.1" value="1" />
+        <span class="field-hint">Smaller = cozier, quicker races. Bigger = longer, more sprawling mazes.</span>
+      </label>
       <p id="modal-error" class="error-text"></p>
       <div class="modal-actions">
         <button id="btn-modal-cancel" class="btn btn-ghost">Cancel</button>
@@ -185,7 +212,20 @@
     </div>
   </div>
 
+  <!-- QR CODE MODAL -->
+  <div id="modal-qr" class="modal-overlay hidden">
+    <div class="modal-panel modal-panel-qr">
+      <h2>Scan to Join</h2>
+      <div class="lobby-qr lobby-qr-big" id="lobby-qr-big"></div>
+      <div class="lobby-qr-caption" id="lobby-qr-big-code"></div>
+      <div class="modal-actions">
+        <button id="btn-qr-modal-close" class="btn btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
+  <script src="vendor/qrcode.js"></script>
   <script src="game.js"></script>
 </body>
 </html>
