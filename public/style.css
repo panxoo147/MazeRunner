@@ -121,10 +121,12 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 .subtitle { color: var(--text-dim); margin: 0 0 18px; font-size: 13px; }
 
 .github-link {
+  /* Hidden per request — markup/link stays in index.html untouched, so
+     flipping this back to `flex` brings it back with no other changes. */
+  display: none;
   position: absolute;
   top: 14px;
   right: 14px;
-  display: flex;
   align-items: center;
   gap: 5px;
   padding: 5px 9px;
